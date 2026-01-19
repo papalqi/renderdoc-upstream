@@ -8,6 +8,7 @@
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "test": "node --test",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {

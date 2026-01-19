@@ -6,10 +6,18 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { parseArgs } from "./cliArgs";
+import { JsonRpcCallError, jsonRpcCall } from "./jsonRpc";
 import { readAllStdin } from "./readStdin";
 import { writeEvent } from "./streamJson";
 
 type AnyRecord = Record<string, unknown>;
+
+type RenderDocGetContextResult = {
+  capture_path: string | null;
+  api: string | number | null;
+  event_id: number;
+  event_name: string | null;
+};
 
 function stableNowMs(): number {
   return Date.now();
@@ -121,14 +129,39 @@ async function run(): Promise<number> {
         "renderdoc.get_context",
         "Get current qrenderdoc capture context (MVP).",
         {},
-        async () => ({
-          content: [
-            {
-              type: "text",
-              text: "renderdoc.get_context is not connected yet (bridge not configured).",
-            },
-          ],
-        }),
+        async () => {
+          const rpcUrl = process.env.RENDERDOC_AI_BRIDGE_URL;
+          const token = process.env.RENDERDOC_AI_BRIDGE_TOKEN;
+
+          if (!rpcUrl || !token) {
+            throw new Error(
+              "Tool bridge not configured. Set RENDERDOC_AI_BRIDGE_URL and RENDERDOC_AI_BRIDGE_TOKEN.",
+            );
+          }
+
+          try {
+            const { requestId, result } = await jsonRpcCall<RenderDocGetContextResult>({
+              rpcUrl,
+              bearerToken: token,
+              method: "renderdoc.get_context",
+              timeoutMs: 2000,
+            });
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: JSON.stringify({ request_id: requestId, result }),
+                },
+              ],
+            };
+          } catch (e) {
+            if (e instanceof JsonRpcCallError) {
+              throw new Error(`Tool bridge RPC failed (request_id=${e.requestId}): ${e.message}`);
+            }
+            throw e;
+          }
+        },
       ),
     ],
   });
