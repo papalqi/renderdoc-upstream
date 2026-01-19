@@ -644,6 +644,7 @@
     <ClCompile Include="$(IntDir)generated\moc_PerformanceCounterViewer.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_PipelineStateViewer.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_PythonContext.cpp" />
+    <ClCompile Include="$(IntDir)generated\moc_AIBridge.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_QRDUtils.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_PipelineFlowChart.cpp" />
     <ClCompile Include="$(IntDir)generated\moc_RangeHistogram.cpp" />
@@ -740,10 +741,11 @@
     <ClCompile Include="Widgets\ReplayOptionsSelector.cpp" />
     <ClCompile Include="Widgets\OrderedListEditor.cpp" />
     <ClCompile Include="Widgets\MarkerBreadcrumbs.cpp" />
-    <ClCompile Include="Code\CaptureContext.cpp" />
-    <ClCompile Include="Styles\RDStyle\RDStyle.cpp" />
-    <ClCompile Include="Styles\StyleData.cpp" />
-    <ClCompile Include="Styles\RDTweakedNativeStyle\RDTweakedNativeStyle.cpp" />
+      <ClCompile Include="Code\CaptureContext.cpp" />
+      <ClCompile Include="Code\ai_agent\AIBridge.cpp" />
+      <ClCompile Include="Styles\RDStyle\RDStyle.cpp" />
+      <ClCompile Include="Styles\StyleData.cpp" />
+      <ClCompile Include="Styles\RDTweakedNativeStyle\RDTweakedNativeStyle.cpp" />
     <ClCompile Include="Widgets\CustomPaintWidget.cpp" />
     <ClCompile Include="Windows\APIInspector.cpp" />
     <ClCompile Include="Windows\ResourceInspector.cpp" />
@@ -1004,29 +1006,36 @@
     <ClInclude Include="$(IntDir)generated\ui_ReplayOptionsSelector.h" />
     <ClInclude Include="$(IntDir)generated\ui_VirtualFileDialog.h" />
     <ClInclude Include="$(IntDir)generated\ui_VulkanPipelineStateViewer.h" />
-    <ClInclude Include="Code\RGPInterop.h" />
-    <ClInclude Include="Code\CaptureContext.h" />
-    <ClInclude Include="Styles\StyleData.h" />
-    <ClInclude Include="Code\qprocessinfo.h" />
-    <ClInclude Include="Code\MiniQtHelper.h" />
+      <ClInclude Include="Code\RGPInterop.h" />
+      <ClInclude Include="Code\CaptureContext.h" />
+      <ClInclude Include="Code\ai_agent\AIBridge.h" />
+      <ClInclude Include="Styles\StyleData.h" />
+      <ClInclude Include="Code\qprocessinfo.h" />
+      <ClInclude Include="Code\MiniQtHelper.h" />
     <CustomBuild Include="Code\pyrenderdoc\PythonContext.h">
       <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
       <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
       <Message>MOC %(Filename).h</Message>
       <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
     </CustomBuild>
-    <CustomBuild Include="Code\QRDUtils.h">
-      <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
-      <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
-      <Message>MOC %(Filename).h</Message>
-      <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
-    </CustomBuild>
-    <CustomBuild Include="Styles\RDStyle\RDStyle.h">
-      <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
-      <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
-      <Message>MOC %(Filename).h</Message>
-      <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
-    </CustomBuild>
+      <CustomBuild Include="Code\QRDUtils.h">
+        <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
+        <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
+        <Message>MOC %(Filename).h</Message>
+        <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
+      </CustomBuild>
+      <CustomBuild Include="Code\ai_agent\AIBridge.h">
+        <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
+        <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
+        <Message>MOC %(Filename).h</Message>
+        <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
+      </CustomBuild>
+      <CustomBuild Include="Styles\RDStyle\RDStyle.h">
+        <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
+        <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>
+        <Message>MOC %(Filename).h</Message>
+        <Outputs>$(IntDir)generated\moc_%(Filename).cpp</Outputs>
+      </CustomBuild>
     <CustomBuild Include="Styles\RDTweakedNativeStyle\RDTweakedNativeStyle.h">
       <AdditionalInputs>%(Fullpath);$(QtBinDir)\moc.exe;%(AdditionalInputs)</AdditionalInputs>
       <Command>"$(QtBinDir)\moc.exe" -DUNICODE -DWIN32 -DWIN64 -D_WIN32 -D_WIN64 -DRENDERDOC_PLATFORM_WIN32 -DSCINTILLA_QT=1 -DSCI_LEXER=1 -DQT_NO_DEBUG -DQT_WIDGETS_LIB -DQT_GUI_LIB -DQT_CORE_LIB -D_MSC_VER=1900 -I"$(ProjectDir)." -I"$(SolutionDir)\renderdoc\api\replay" -I"$(QtIncludeDir)" -I"$(QtIncludeDir)\QtWidgets" -I"$(QtIncludeDir)\QtGui" -I"$(QtIncludeDir)\QtCore" "%(Fullpath)" -o "$(IntDir)generated\moc_%(Filename).cpp"</Command>

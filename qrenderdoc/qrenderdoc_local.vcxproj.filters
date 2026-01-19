@@ -120,12 +120,15 @@
     <ClCompile Include="Widgets\ThumbnailStrip.cpp">
       <Filter>Widgets</Filter>
     </ClCompile>
-    <ClCompile Include="Code\CaptureContext.cpp">
-      <Filter>Code</Filter>
-    </ClCompile>
-    <ClCompile Include="Widgets\TextureGoto.cpp">
-      <Filter>Widgets</Filter>
-    </ClCompile>
+      <ClCompile Include="Code\CaptureContext.cpp">
+        <Filter>Code</Filter>
+      </ClCompile>
+      <ClCompile Include="Code\ai_agent\AIBridge.cpp">
+        <Filter>Code</Filter>
+      </ClCompile>
+      <ClCompile Include="Widgets\TextureGoto.cpp">
+        <Filter>Widgets</Filter>
+      </ClCompile>
     <ClCompile Include="Widgets\RangeHistogram.cpp">
       <Filter>Widgets</Filter>
     </ClCompile>
@@ -585,12 +588,15 @@
     <ClCompile Include="$(IntDir)generated\qrenderdoc_python.cxx">
       <Filter>Generated Files</Filter>
     </ClCompile>
-    <ClCompile Include="$(IntDir)generated\moc_PythonContext.cpp">
-      <Filter>Generated Files</Filter>
-    </ClCompile>
-    <ClCompile Include="Code\Interface\PersistantConfig.cpp">
-      <Filter>Code\Interface</Filter>
-    </ClCompile>
+      <ClCompile Include="$(IntDir)generated\moc_PythonContext.cpp">
+        <Filter>Generated Files</Filter>
+      </ClCompile>
+      <ClCompile Include="$(IntDir)generated\moc_AIBridge.cpp">
+        <Filter>Generated Files</Filter>
+      </ClCompile>
+      <ClCompile Include="Code\Interface\PersistantConfig.cpp">
+        <Filter>Code\Interface</Filter>
+      </ClCompile>
     <ClCompile Include="Code\Interface\RemoteHost.cpp">
       <Filter>Code\Interface</Filter>
     </ClCompile>
@@ -788,12 +794,15 @@
     <ClInclude Include="3rdparty\flowlayout\FlowLayout.h">
       <Filter>3rdparty\FlowLayout</Filter>
     </ClInclude>
-    <ClInclude Include="Code\CaptureContext.h">
-      <Filter>Code</Filter>
-    </ClInclude>
-    <ClInclude Include="Code\qprocessinfo.h">
-      <Filter>Code</Filter>
-    </ClInclude>
+      <ClInclude Include="Code\CaptureContext.h">
+        <Filter>Code</Filter>
+      </ClInclude>
+      <ClInclude Include="Code\ai_agent\AIBridge.h">
+        <Filter>Code</Filter>
+      </ClInclude>
+      <ClInclude Include="Code\qprocessinfo.h">
+        <Filter>Code</Filter>
+      </ClInclude>
     <ClInclude Include="3rdparty\scintilla\lexlib\Accessor.h">
       <Filter>3rdparty\Scintilla\lexlib</Filter>
     </ClInclude>

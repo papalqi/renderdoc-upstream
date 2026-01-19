@@ -168,13 +168,14 @@ win32 {
 
 SOURCES += Code/qrenderdoc.cpp \
     Code/qprocessinfo.cpp \
-    Code/ReplayManager.cpp \
-    Code/CaptureContext.cpp \
-    Code/ScintillaSyntax.cpp \
-    Code/QRDUtils.cpp \
-    Code/MiniQtHelper.cpp \
-    Code/BufferFormatter.cpp \
-    Code/Resources.cpp \
+      Code/ReplayManager.cpp \
+      Code/CaptureContext.cpp \
+      Code/ai_agent/AIBridge.cpp \
+      Code/ScintillaSyntax.cpp \
+      Code/QRDUtils.cpp \
+      Code/MiniQtHelper.cpp \
+      Code/BufferFormatter.cpp \
+      Code/Resources.cpp \
     Code/RGPInterop.cpp \
     Code/pyrenderdoc/PythonContext.cpp \
     Code/Interface/QRDInterface.cpp \
@@ -255,13 +256,14 @@ SOURCES += Code/qrenderdoc.cpp \
     Windows/Dialogs/CameraControlsDialog.cpp \
     Windows/Dialogs/ProjectionGuessDialog.cpp
 HEADERS += Code/CaptureContext.h \
-    Code/qprocessinfo.h \
-    Code/ReplayManager.h \
-    Code/ScintillaSyntax.h \
-    Code/QRDUtils.h \
-    Code/MiniQtHelper.h \
-    Code/Resources.h \
-    Code/RGPInterop.h \
+      Code/qprocessinfo.h \
+      Code/ReplayManager.h \
+      Code/ai_agent/AIBridge.h \
+      Code/ScintillaSyntax.h \
+      Code/QRDUtils.h \
+      Code/MiniQtHelper.h \
+      Code/Resources.h \
+      Code/RGPInterop.h \
     Code/pyrenderdoc/PythonContext.h \
     Code/pyrenderdoc/pyconversion.h \
     Code/pyrenderdoc/interface_check.h \
