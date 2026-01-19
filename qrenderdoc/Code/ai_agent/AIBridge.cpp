@@ -5,10 +5,10 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
-#include <QRandomGenerator>
 #include <QStandardPaths>
 #include <QTcpServer>
 #include <QThread>
+#include <QUuid>
 
 #include "Code/Interface/QRDInterface.h"
 #include "Code/pyrenderdoc/PythonContext.h"
@@ -437,10 +437,13 @@ void AIBridge::onWorkerError(const QString &message)
 QString AIBridge::generateToken()
 {
   QByteArray bytes;
-  bytes.resize(32);
+  while(bytes.size() < 32)
+  {
+    // QUuid is available in older Qt versions and uses platform RNG where possible.
+    bytes.append(QUuid::createUuid().toRfc4122());
+  }
 
-  for(int i = 0; i < bytes.size(); i++)
-    bytes[i] = char(QRandomGenerator::global()->generate() & 0xFF);
+  bytes.truncate(32);
 
   return QString::fromUtf8(bytes.toHex());
 }
