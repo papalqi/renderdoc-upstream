@@ -50,3 +50,7 @@ plugins-*/
 __pycache__
 .idea/
 .codebuddy/
+
+# Node.js dependencies (qrenderdoc AI Agent Host)
+**/node_modules/
+qrenderdoc/CodeBuddyAgentHost/dist/

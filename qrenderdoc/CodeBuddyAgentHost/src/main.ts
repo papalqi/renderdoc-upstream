@@ -1,0 +1,211 @@
+import { createSdkMcpServer, query, tool, type Message } from "@tencent-ai/agent-sdk";
+
+import { parseArgs } from "./cliArgs";
+import { readAllStdin } from "./readStdin";
+import { writeEvent } from "./streamJson";
+
+type AnyRecord = Record<string, unknown>;
+
+function stableNowMs(): number {
+  return Date.now();
+}
+
+function normalizePrompt(input: string): string {
+  return input.trim();
+}
+
+async function run(): Promise<number> {
+  const start = stableNowMs();
+  const args = parseArgs(process.argv.slice(2));
+
+  const prompt = normalizePrompt(await readAllStdin());
+  if (!prompt) {
+    writeEvent({ type: "result", status: "error" });
+    return 2;
+  }
+
+  const pid = typeof process.pid === "number" ? process.pid : undefined;
+  writeEvent({ type: "init", pid, model: args.model });
+  writeEvent({ type: "message", role: "system", content: "Starting agent..." });
+
+  const toolNameById = new Map<string, string>();
+
+  const renderdocServer = createSdkMcpServer({
+    name: "renderdoc",
+    version: "0.1.0",
+    tools: [
+      tool(
+        "renderdoc.get_context",
+        "Get current qrenderdoc capture context (MVP).",
+        {},
+        async () => ({
+          content: [
+            {
+              type: "text",
+              text: "renderdoc.get_context is not connected yet (bridge not configured).",
+            },
+          ],
+        }),
+      ),
+    ],
+  });
+
+  const allowTool = async (
+    toolName: string,
+    input: Record<string, unknown>,
+  ): Promise<{ behavior: "allow"; updatedInput: Record<string, unknown> } | { behavior: "deny"; message: string }> => {
+    if (toolName === "renderdoc.get_context")
+      return { behavior: "allow", updatedInput: input };
+    return { behavior: "deny", message: "Tool not allowed by host policy." };
+  };
+
+  const abortController = new AbortController();
+
+  let canceled = false;
+  let cancelReason: "signal" | "timeout" | null = null;
+
+  const timeout = setTimeout(() => {
+    canceled = true;
+    cancelReason = "timeout";
+    abortController.abort();
+  }, args.timeoutMs);
+
+  try {
+    const q = query({
+      prompt,
+      options: {
+        abortController,
+        model: args.model,
+        permissionMode: "dontAsk",
+        canUseTool: async (toolName, input) => allowTool(toolName, input),
+        mcpServers: {
+          renderdoc: renderdocServer,
+        },
+      },
+    });
+
+    const cancel = async () => {
+      if (canceled) return;
+      canceled = true;
+      cancelReason = "signal";
+      abortController.abort();
+      try {
+        await q.interrupt();
+      } catch {
+        // ignore
+      }
+    };
+    process.on("SIGINT", () => void cancel());
+    process.on("SIGTERM", () => void cancel());
+
+    for await (const msg of q as AsyncIterable<Message>) {
+      if (canceled) break;
+
+      if (msg.type === "system") {
+        // Best-effort: surface session metadata as a system message (init was already emitted).
+        if (msg.subtype === "init") {
+          writeEvent({
+            type: "message",
+            role: "system",
+            content: `Session: ${msg.session_id}  Model: ${msg.model}`,
+          });
+        }
+        continue;
+      }
+
+      if (msg.type === "assistant") {
+        for (const block of msg.message.content) {
+          if (block.type === "text") {
+            const text = block.text.trimEnd();
+            if (text) writeEvent({ type: "message", role: "assistant", content: text });
+            continue;
+          }
+
+          if (block.type === "tool_use") {
+            toolNameById.set(block.id, block.name);
+            writeEvent({
+              type: "tool_call",
+              call_id: block.id,
+              name: block.name,
+              arguments: block.input,
+            });
+            continue;
+          }
+
+          if (block.type === "tool_result") {
+            const name = toolNameById.get(block.tool_use_id) ?? "unknown";
+            if (block.is_error) {
+              writeEvent({
+                type: "tool_result",
+                call_id: block.tool_use_id,
+                name,
+                ok: false,
+                error: {
+                  code: "tool_error",
+                  message: typeof block.content === "string" ? block.content : "tool error",
+                },
+              });
+            } else {
+              writeEvent({
+                type: "tool_result",
+                call_id: block.tool_use_id,
+                name,
+                ok: true,
+                result: block.content ?? "",
+              });
+            }
+            continue;
+          }
+        }
+
+        continue;
+      }
+
+      if (msg.type === "user") {
+        const content = msg.message.content;
+        if (typeof content === "string") {
+          writeEvent({ type: "message", role: "user", content });
+        } else {
+          writeEvent({ type: "message", role: "user", content: JSON.stringify(content) });
+        }
+        continue;
+      }
+
+      if (msg.type === "error") {
+        writeEvent({ type: "error", message: msg.error });
+        continue;
+      }
+
+      if (msg.type === "result") {
+        // The SDK result indicates the session finished.
+        const status = msg.is_error ? "error" : "ok";
+        writeEvent({ type: "result", status, elapsed_ms: stableNowMs() - start });
+        clearTimeout(timeout);
+        return msg.is_error ? 1 : 0;
+      }
+
+      // Keep deterministic output even for unhandled message types.
+      writeEvent({ type: "error", message: "unhandled sdk message", details: msg as unknown as AnyRecord });
+    }
+
+    clearTimeout(timeout);
+
+    if (canceled) {
+      writeEvent({ type: "result", status: "canceled", elapsed_ms: stableNowMs() - start });
+      return cancelReason === "timeout" ? 124 : 130;
+    }
+
+    writeEvent({ type: "result", status: "ok", elapsed_ms: stableNowMs() - start });
+    return 0;
+  } catch (e) {
+    clearTimeout(timeout);
+    writeEvent({ type: "error", message: "agent host failed", details: String(e) });
+    writeEvent({ type: "result", status: "error", elapsed_ms: stableNowMs() - start });
+    return 1;
+  }
+}
+
+run().then(
+  (code) => process.exit(code),
+  () => process.exit(1),
+);

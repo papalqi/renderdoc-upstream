@@ -1,0 +1,20 @@
+{
+  "name": "renderdoc-codebuddy-agent-host",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent Host for qrenderdoc AI integration (CodeBuddy Agent SDK).",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@tencent-ai/agent-sdk": "^0.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.30",
+    "typescript": "^5.3.3"
+  }
+}
