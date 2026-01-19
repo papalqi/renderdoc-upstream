@@ -1,0 +1,7 @@
+{"type":"init","session_id":"example-session","model":"example-model","pid":12345}
+{"type":"message","role":"user","content":"What capture is open?"}
+{"type":"tool_call","call_id":"call-1","name":"renderdoc.get_context","arguments":{}}
+{"type":"tool_result","call_id":"call-1","name":"renderdoc.get_context","ok":true,"result":{"capture_path":"C:/captures/example.rdc","api":"D3D12","event_id":123,"event_name":"DrawIndexed(36)"}}
+{"type":"message","role":"assistant","content":"The open capture is C:/captures/example.rdc and the current event is 123 (DrawIndexed(36))."}
+{"type":"result","status":"ok","elapsed_ms":42}
+
