@@ -1,5 +1,10 @@
 import { createSdkMcpServer, query, tool, type Message } from "@tencent-ai/agent-sdk";
 
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { spawnSync } from "node:child_process";
+
 import { parseArgs } from "./cliArgs";
 import { readAllStdin } from "./readStdin";
 import { writeEvent } from "./streamJson";
@@ -12,6 +17,66 @@ function stableNowMs(): number {
 
 function normalizePrompt(input: string): string {
   return input.trim();
+}
+
+function authHelpText(): string {
+  return [
+    "Authentication required.",
+    "Fix:",
+    "- Run CodeBuddy Code in a terminal, then execute /login to sign in.",
+    "- Or set CODEBUDDY_API_KEY for non-interactive usage.",
+  ].join("\n");
+}
+
+function isAuthErrorText(text: string): boolean {
+  const t = text.toLowerCase();
+  return t.includes("authentication required") || t.includes("unauthorized") || t.includes("/login");
+}
+
+function fileExistsNonEmpty(p: string): boolean {
+  try {
+    const st = fs.statSync(p);
+    return st.isFile() && st.size > 0;
+  } catch {
+    return false;
+  }
+}
+
+function isLikelyLoggedIn(): boolean {
+  if (process.env.CODEBUDDY_API_KEY) return true;
+  if (process.env.CODEBUDDY_AUTH_TOKEN) return true;
+
+  const home = os.homedir();
+  return fileExistsNonEmpty(path.join(home, ".codebuddy-cli", "oauth_creds.json"));
+}
+
+function resolveBundledCodebuddyPath(): string | null {
+  if (process.env.CODEBUDDY_CODE_PATH && fs.existsSync(process.env.CODEBUDDY_CODE_PATH)) {
+    return process.env.CODEBUDDY_CODE_PATH;
+  }
+
+  const filename = process.platform === "win32" ? "codebuddy.cmd" : "codebuddy";
+  const candidate = path.join(__dirname, "..", "bin", filename);
+  if (fs.existsSync(candidate)) return candidate;
+
+  return null;
+}
+
+function detectAuthRequiredViaCli(codebuddyPath: string, model: string | undefined, timeoutMs: number): boolean {
+  const cliArgs: string[] = ["--print", "--output-format", "json", "--setting-sources", "user"];
+  if (model) cliArgs.push("--model", model);
+  cliArgs.push("ping");
+
+  const r = spawnSync(codebuddyPath, cliArgs, {
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: timeoutMs,
+    maxBuffer: 1024 * 1024,
+  });
+
+  const out = `${r.stdout ?? ""}\n${r.stderr ?? ""}`.trim();
+  if (!out) return false;
+  return isAuthErrorText(out);
 }
 
 async function run(): Promise<number> {
@@ -27,6 +92,24 @@ async function run(): Promise<number> {
   const pid = typeof process.pid === "number" ? process.pid : undefined;
   writeEvent({ type: "init", pid, model: args.model });
   writeEvent({ type: "message", role: "system", content: "Starting agent..." });
+
+  const bundledCodebuddy = resolveBundledCodebuddyPath();
+  if (!bundledCodebuddy) {
+    writeEvent({
+      type: "error",
+      code: "codebuddy_not_found",
+      message: "CodeBuddy CLI not found for Agent SDK. Set CODEBUDDY_CODE_PATH or reinstall dependencies.",
+    });
+    writeEvent({ type: "result", status: "error", elapsed_ms: stableNowMs() - start });
+    return 1;
+  }
+
+  // Best-effort auth precheck. If credentials are missing, exit early with clear guidance.
+  if (!isLikelyLoggedIn() && !process.env.CODEBUDDY_API_KEY && !process.env.CODEBUDDY_AUTH_TOKEN) {
+    writeEvent({ type: "error", code: "auth_required", message: authHelpText() });
+    writeEvent({ type: "result", status: "error", elapsed_ms: stableNowMs() - start });
+    return 3;
+  }
 
   const toolNameById = new Map<string, string>();
 
@@ -77,6 +160,11 @@ async function run(): Promise<number> {
         abortController,
         model: args.model,
         permissionMode: "dontAsk",
+        // Reuse existing CLI credentials/settings from user profile by default.
+        settingSources: ["user"],
+        env: {
+          CODEBUDDY_CODE_PATH: bundledCodebuddy,
+        },
         canUseTool: async (toolName, input) => allowTool(toolName, input),
         mcpServers: {
           renderdoc: renderdocServer,
@@ -199,7 +287,14 @@ async function run(): Promise<number> {
     return 0;
   } catch (e) {
     clearTimeout(timeout);
-    writeEvent({ type: "error", message: "agent host failed", details: String(e) });
+    const errText = String(e);
+    if (isAuthErrorText(errText) || (errText.includes("Transport closed") && detectAuthRequiredViaCli(bundledCodebuddy, args.model, 15000))) {
+      writeEvent({ type: "error", code: "auth_required", message: authHelpText() });
+      writeEvent({ type: "result", status: "error", elapsed_ms: stableNowMs() - start });
+      return 3;
+    }
+
+    writeEvent({ type: "error", message: "agent host failed", details: errText });
     writeEvent({ type: "result", status: "error", elapsed_ms: stableNowMs() - start });
     return 1;
   }

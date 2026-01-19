@@ -54,3 +54,7 @@ __pycache__
 # Node.js dependencies (qrenderdoc AI Agent Host)
 **/node_modules/
 qrenderdoc/CodeBuddyAgentHost/dist/
+
+# Allow repo-tracked helper scripts for the AI Agent Host.
+!qrenderdoc/CodeBuddyAgentHost/bin/
+!qrenderdoc/CodeBuddyAgentHost/bin/codebuddy.cmd
