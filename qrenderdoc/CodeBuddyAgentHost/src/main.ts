@@ -64,8 +64,18 @@ function resolveBundledCodebuddyPath(): string | null {
   }
 
   const filename = process.platform === "win32" ? "codebuddy.cmd" : "codebuddy";
-  const candidate = path.join(__dirname, "..", "bin", filename);
-  if (fs.existsSync(candidate)) return candidate;
+  const candidates = [
+    // Packaged layout: main.js and wrapper live side-by-side in ai/agent-host/
+    path.join(__dirname, filename),
+    // Alternative packaged layout
+    path.join(__dirname, "bin", filename),
+    // Developer layout: dist/ -> bin/
+    path.join(__dirname, "..", "bin", filename),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
 
   return null;
 }

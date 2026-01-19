@@ -152,3 +152,17 @@ This checklist is intended to be run before shipping the MVP integration.
 6. Press Cancel during an active request and confirm:
    - the running process exits
    - subsequent retries do not hang or leak processes
+
+## Packaging notes (portable runtime)
+
+Expected layout next to `qrenderdoc.exe`:
+
+- `ai/node/node.exe` (portable Node runtime)
+- `ai/agent-host/main.js` (Agent Host bundle, no node_modules)
+- `ai/agent-host/codebuddy.cmd` (Windows wrapper used by the SDK to spawn CodeBuddy CLI)
+- `ai/agent-host/codebuddy.js` (CodeBuddy CLI JS bundle from the Agent SDK)
+
+Helper scripts:
+
+- `scripts/ai_agent/fetch_node.ps1` downloads and verifies Node (SHA256 via `SHASUMS256.txt`).
+- `scripts/ai_agent/deploy_ai_agent.ps1` copies the Agent Host bundle and CLI into an output dir and writes `codebuddy.cmd`.

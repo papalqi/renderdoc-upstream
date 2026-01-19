@@ -291,6 +291,9 @@ void CodeBuddyAssistant::startQuery(const QString &prompt)
     args << lit("--model") << model;
 
   appendSystem(tr("Starting Agent Host..."));
+  appendSystem(tr("Node: %1").arg(nodeExe));
+  appendSystem(tr("Agent Host: %1").arg(hostEntry));
+  appendSystem(tr("Tool bridge: %1").arg(m_Bridge->RpcUrl()));
   qInfo() << "CodeBuddyAssistant starting:" << nodeExe << args << "cwd:" << workDir
           << "bridge:" << m_Bridge->RpcUrl();
 
