@@ -124,3 +124,31 @@ Result object:
 - `event_id` (number)
 - `event_name` (string or null)
 
+## Validation checklist (MVP)
+
+This checklist is intended to be run before shipping the MVP integration.
+
+### Node Agent Host
+
+- `cd qrenderdoc/CodeBuddyAgentHost`
+- `npm run typecheck`
+- `npm test`
+
+### qrenderdoc build (Windows)
+
+- Open `renderdoc.sln`
+- Build `qrenderdoc` in `Development|x64` (warnings-as-errors)
+
+### Manual E2E (qrenderdoc UI)
+
+1. Launch qrenderdoc and open any capture.
+2. Open `Window -> AI Assistant (CodeBuddy)`.
+3. Confirm the panel shows a "Tool bridge started" message (or a clear error).
+4. Enter a prompt that forces a tool call, e.g.:
+   - "Call renderdoc.get_context and report capture_path, api, event_id, event_name."
+5. Confirm the UI shows:
+   - `tool_call` event for `renderdoc.get_context`
+   - `tool_result` event with `ok=true` and a JSON result payload
+6. Press Cancel during an active request and confirm:
+   - the running process exits
+   - subsequent retries do not hang or leak processes
