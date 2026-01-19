@@ -190,6 +190,7 @@ SOURCES += Code/qrenderdoc.cpp \
     Windows/Dialogs/CrashDialog.cpp \
     Windows/Dialogs/UpdateDialog.cpp \
     Windows/MainWindow.cpp \
+    Windows/CodeBuddyAssistant.cpp \
     Windows/EventBrowser.cpp \
     Windows/TextureViewer.cpp \
     Windows/ShaderViewer.cpp \
@@ -279,6 +280,7 @@ HEADERS += Code/CaptureContext.h \
     Windows/Dialogs/CrashDialog.h \
     Windows/Dialogs/UpdateDialog.h \
     Windows/MainWindow.h \
+    Windows/CodeBuddyAssistant.h \
     Windows/EventBrowser.h \
     Windows/TextureViewer.h \
     Windows/ShaderViewer.h \

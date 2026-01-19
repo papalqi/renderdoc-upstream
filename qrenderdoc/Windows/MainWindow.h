@@ -49,6 +49,7 @@ class QToolButton;
 class CaptureDialog;
 class LiveCapture;
 class QNetworkAccessManager;
+class CodeBuddyAssistant;
 
 class NetworkWorker : public QObject
 {
@@ -139,6 +140,7 @@ public:
   void showStatisticsViewer() { on_action_Statistics_Viewer_triggered(); }
   void showTimelineBar() { on_action_Timeline_triggered(); }
   void showPythonShell() { on_action_Python_Shell_triggered(); }
+  void showCodeBuddyAssistant() { on_action_CodeBuddy_Assistant_triggered(); }
   void showPerformanceCounterViewer() { on_action_Counter_Viewer_triggered(); }
   void showResourceInspector() { on_action_Resource_Inspector_triggered(); }
   void showExtensionManager() { on_action_Manage_Extensions_triggered(); }
@@ -165,6 +167,7 @@ private slots:
   void on_action_Statistics_Viewer_triggered();
   void on_action_Timeline_triggered();
   void on_action_Python_Shell_triggered();
+  void on_action_CodeBuddy_Assistant_triggered();
   void on_action_Inject_into_Process_triggered();
   void on_action_Resolve_Symbols_triggered();
   void on_action_Recompress_Capture_triggered();
@@ -237,6 +240,8 @@ private:
 
   Ui::MainWindow *ui;
   ICaptureContext &m_Ctx;
+
+  CodeBuddyAssistant *m_CodeBuddyAssistant = NULL;
 
   QList<LiveCapture *> m_LiveCaptures;
 

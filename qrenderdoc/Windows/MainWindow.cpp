@@ -52,6 +52,7 @@
 #include "Windows/Dialogs/SuggestRemoteDialog.h"
 #include "Windows/Dialogs/TipsDialog.h"
 #include "Windows/Dialogs/UpdateDialog.h"
+#include "Windows/CodeBuddyAssistant.h"
 #include "ui_MainWindow.h"
 #include "version.h"
 
@@ -2604,6 +2605,19 @@ void MainWindow::on_action_Python_Shell_triggered()
     ToolWindowManager::raiseToolWindow(py);
   else
     ui->toolWindowManager->addToolWindow(py, mainToolArea());
+}
+
+void MainWindow::on_action_CodeBuddy_Assistant_triggered()
+{
+  if(!m_CodeBuddyAssistant)
+    m_CodeBuddyAssistant = new CodeBuddyAssistant(m_Ctx, this);
+
+  QWidget *w = m_CodeBuddyAssistant->Widget();
+
+  if(ui->toolWindowManager->toolWindows().contains(w))
+    ToolWindowManager::raiseToolWindow(w);
+  else
+    ui->toolWindowManager->addToolWindow(w, mainToolArea());
 }
 
 void MainWindow::on_action_Resolve_Symbols_triggered()
