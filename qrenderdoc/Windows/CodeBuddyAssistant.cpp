@@ -98,11 +98,15 @@ CodeBuddyAssistant::CodeBuddyAssistant(ICaptureContext &ctx, QWidget *parent)
   QObject::connect(m_Send, &QPushButton::clicked, this, &CodeBuddyAssistant::onSend);
   QObject::connect(m_Cancel, &QPushButton::clicked, this, &CodeBuddyAssistant::onCancel);
 
-  m_Bridge = new AIBridge(m_Ctx, this);
+  m_Bridge = new AIBridge(&m_Ctx, this);
   QObject::connect(m_Bridge, &AIBridge::BridgeStarted, this,
-                   [this]() { appendSystem(tr("Tool bridge started: %1").arg(m_Bridge->RpcUrl())); });
+                   [this]() {
+                     appendSystem(tr("Tool bridge started: %1").arg(m_Bridge->RpcUrl()));
+                   });
   QObject::connect(m_Bridge, &AIBridge::BridgeError, this,
-                   [this](const QString &msg) { appendError(tr("Tool bridge error: %1").arg(msg)); });
+                   [this](const QString &msg) {
+                     appendError(tr("Tool bridge error: %1").arg(msg));
+                   });
   m_Bridge->Start();
 
   appendSystem(tr("Backend: Node Agent Host (CodeBuddy Agent SDK)."));
@@ -227,7 +231,9 @@ QString CodeBuddyAssistant::buildPrompt(const QString &userPrompt) const
   ctx += lit("- Capture: ") + (capture.isEmpty() ? lit("<none>") : capture) + lit("\n");
   ctx += lit("- API: ") + (api.isEmpty() ? lit("<unknown>") : api) + lit("\n");
   ctx += lit("- Current eventId: ") + QString::number(eid) + lit("\n");
-  ctx += lit("- Current event name: ") + (eventName.isEmpty() ? lit("<unknown>") : eventName) + lit("\n\n");
+  ctx += lit("- Current event name: ");
+  ctx += eventName.isEmpty() ? lit("<unknown>") : eventName;
+  ctx += lit("\n\n");
 
   ctx += lit("User question:\n");
   ctx += prompt;
@@ -273,7 +279,8 @@ void CodeBuddyAssistant::startQuery(const QString &prompt)
     return;
   }
 
-  if(!m_Bridge || !m_Bridge->IsRunning() || m_Bridge->RpcUrl().isEmpty() || m_Bridge->Token().isEmpty())
+  if(!m_Bridge || !m_Bridge->IsRunning() || m_Bridge->RpcUrl().isEmpty() ||
+     m_Bridge->Token().isEmpty())
   {
     appendError(tr("Tool bridge is not ready."));
     appendSystem(tr("Wait a moment and try again."));
@@ -308,9 +315,12 @@ void CodeBuddyAssistant::startQuery(const QString &prompt)
   env.insert(lit("RENDERDOC_AI_BRIDGE_TOKEN"), m_Bridge->Token());
   m_Process->setProcessEnvironment(env);
 
-  QObject::connect(m_Process, &QProcess::readyReadStandardOutput, this, &CodeBuddyAssistant::onStdOutReady);
-  QObject::connect(m_Process, &QProcess::readyReadStandardError, this, &CodeBuddyAssistant::onStdErrReady);
-  QObject::connect(m_Process, OverloadedSlot<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+  QObject::connect(m_Process, &QProcess::readyReadStandardOutput, this,
+                   &CodeBuddyAssistant::onStdOutReady);
+  QObject::connect(m_Process, &QProcess::readyReadStandardError, this,
+                   &CodeBuddyAssistant::onStdErrReady);
+  QObject::connect(m_Process,
+                   OverloadedSlot<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
                    &CodeBuddyAssistant::onFinished);
   QObject::connect(m_Process, &QProcess::errorOccurred, this, &CodeBuddyAssistant::onErrorOccurred);
 

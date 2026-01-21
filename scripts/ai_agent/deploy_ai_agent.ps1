@@ -3,6 +3,7 @@
 # This script copies:
 # - Agent Host bundle: qrenderdoc/CodeBuddyAgentHost/dist/bundle/main.js -> <out>/ai/agent-host/main.js
 # - CodeBuddy CLI JS:  node_modules/@tencent-ai/agent-sdk/cli/dist/codebuddy.js -> <out>/ai/agent-host/codebuddy.js
+# - CodeBuddy product configuration: node_modules/@tencent-ai/agent-sdk/cli/product.json -> <out>/ai/agent-host/product.json
 # - Wrapper command:   <out>/ai/agent-host/codebuddy.cmd
 # - Optional Node:     <out>/ai/node/node.exe
 #
@@ -56,6 +57,13 @@ if (!(Test-Path $cliJsSource)) {
 }
 
 Copy-Item -Force $cliJsSource (Join-Path $outAgentHost "codebuddy.js")
+
+$productJsonSource = Join-Path $root "qrenderdoc\\CodeBuddyAgentHost\\node_modules\\@tencent-ai\\agent-sdk\\cli\\product.json"
+if (!(Test-Path $productJsonSource)) {
+    throw "CodeBuddy product.json not found: $productJsonSource. Run: cd qrenderdoc/CodeBuddyAgentHost; npm install"
+}
+
+Copy-Item -Force $productJsonSource (Join-Path $outAgentHost "product.json")
 
 # Write codebuddy.cmd wrapper (Windows) that uses the bundled Node runtime.
 $cmdPath = Join-Path $outAgentHost "codebuddy.cmd"

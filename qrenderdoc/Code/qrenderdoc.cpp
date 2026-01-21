@@ -202,7 +202,8 @@ int main(int argc, char *argv[])
   bool envChanged = false;
   {
     const char *qpa_plat = getenv("QT_QPA_PLATFORM");
-    // if not set or empty, force non-wayland to help go through backwards compatibility path on wayland.
+    // if not set or empty, force non-wayland to help go through backwards compatibility path on
+    // wayland.
     if(!qpa_plat || qpa_plat[0] == 0)
     {
       setenv("QT_QPA_PLATFORM", "xcb", 1);
@@ -223,7 +224,7 @@ int main(int argc, char *argv[])
 
 // shortcut here so we can run this with a non-GUI application
 #if ENABLE_UNIT_TESTS
-  if(QString::fromUtf8(argv[1]) == lit("--unittest"))
+  if(argc >= 2 && QString::fromUtf8(argv[1]) == lit("--unittest"))
   {
     char **mod_argv = new char *[argc + 1];
     char **alloc_argv = mod_argv;
@@ -248,44 +249,53 @@ int main(int argc, char *argv[])
 
     mod_argv[0] = argv[0];
 
-    if(test_logOut == NULL)
-      test_logOut = stdout;
-
-    LogOutputter logbuf(test_logOut);
-    std::ostream logstream(&logbuf);
-
     int ret = 0;
 
-    // catch tests first
+    // create a non-GUI Qt app for any tests that need an event dispatcher.
+    // make a copy of argv since QCoreApplication may modify it.
+    int qt_argc = argc;
+    char **qt_argv = new char *[argc + 1];
+    for(int i = 0; i < argc; i++)
+      qt_argv[i] = mod_argv[i];
+    qt_argv[argc] = 0;
+
     {
-      catch_stream = &logstream;
+      QCoreApplication application(qt_argc, qt_argv);
 
-      Catch::Session session;
+      if(test_logOut == NULL)
+        test_logOut = stdout;
 
-      session.configData().name = "QRenderDoc";
-      session.configData().shouldDebugBreak = Catch::isDebuggerActive();
+      LogOutputter logbuf(test_logOut);
+      std::ostream logstream(&logbuf);
 
-      ret = session.applyCommandLine(argc, mod_argv);
+      GlobalEnvironment env;
+      env.enumerateGPUs = false;
+      rdcarray<rdcstr> coreargs;
+      RENDERDOC_InitialiseReplay(env, coreargs);
 
-      if(ret == 0)
+      // catch tests first
       {
-        int numFailed = session.run();
+        catch_stream = &logstream;
 
-        // Note that on unices only the lower 8 bits are usually used, clamping
-        // the return value to 255 prevents false negative when some multiple
-        // of 256 tests has failed
-        if(numFailed != 0)
-          ret = (numFailed < 0xff ? numFailed : 0xff);
+        Catch::Session session;
+
+        session.configData().name = "QRenderDoc";
+        session.configData().shouldDebugBreak = Catch::isDebuggerActive();
+
+        ret = session.applyCommandLine(argc, mod_argv);
+
+        if(ret == 0)
+        {
+          int numFailed = session.run();
+
+          // Note that on unices only the lower 8 bits are usually used, clamping
+          // the return value to 255 prevents false negative when some multiple
+          // of 256 tests has failed
+          if(numFailed != 0)
+            ret = (numFailed < 0xff ? numFailed : 0xff);
+        }
       }
-    }
 
-    GlobalEnvironment env;
-    env.enumerateGPUs = false;
-    rdcarray<rdcstr> coreargs;
-    RENDERDOC_InitialiseReplay(env, coreargs);
-
-    {
-      QCoreApplication application(argc, mod_argv);
       PythonContext::GlobalInit();
 
       logstream << "Checking python binding consistency.\n";
@@ -309,15 +319,17 @@ int main(int argc, char *argv[])
       }
 
       PythonContext::GlobalShutdown();
+
+      RENDERDOC_ShutdownReplay();
+
+      logbuf.finish();
     }
 
-    RENDERDOC_ShutdownReplay();
-
-    logbuf.finish();
-
+    delete[] qt_argv;
     delete[] alloc_argv;
 
-    fclose(test_logOut);
+    if(test_logOut != stdout)
+      fclose(test_logOut);
     return ret;
   }
 #endif

@@ -138,6 +138,7 @@ This checklist is intended to be run before shipping the MVP integration.
 
 - Open `renderdoc.sln`
 - Build `qrenderdoc` in `Development|x64` (warnings-as-errors)
+- Run unit tests: `qrenderdoc.exe --unittest` (optional: `log=unittest.log`)
 
 ### Manual E2E (qrenderdoc UI)
 
@@ -161,6 +162,7 @@ Expected layout next to `qrenderdoc.exe`:
 - `ai/agent-host/main.js` (Agent Host bundle, no node_modules)
 - `ai/agent-host/codebuddy.cmd` (Windows wrapper used by the SDK to spawn CodeBuddy CLI)
 - `ai/agent-host/codebuddy.js` (CodeBuddy CLI JS bundle from the Agent SDK)
+- `ai/agent-host/product.json` (CodeBuddy product configuration required by the CLI)
 
 Helper scripts:
 

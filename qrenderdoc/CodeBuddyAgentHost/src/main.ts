@@ -1,7 +1,12 @@
-import { createSdkMcpServer, query, tool, type Message } from "@tencent-ai/agent-sdk";
+import {
+  createSdkMcpServer,
+  query,
+  tool,
+  type Message,
+  unstable_v2_authenticate,
+} from "@tencent-ai/agent-sdk";
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -31,8 +36,8 @@ function authHelpText(): string {
   return [
     "Authentication required.",
     "Fix:",
-    "- Run CodeBuddy Code in a terminal, then execute /login to sign in.",
-    "- Or set CODEBUDDY_API_KEY for non-interactive usage.",
+    "- Run the authentication flow and open the provided login URL.",
+    "- Or set CODEBUDDY_API_KEY / CODEBUDDY_AUTH_TOKEN for non-interactive usage.",
   ].join("\n");
 }
 
@@ -41,21 +46,36 @@ function isAuthErrorText(text: string): boolean {
   return t.includes("authentication required") || t.includes("unauthorized") || t.includes("/login");
 }
 
-function fileExistsNonEmpty(p: string): boolean {
-  try {
-    const st = fs.statSync(p);
-    return st.isFile() && st.size > 0;
-  } catch {
-    return false;
-  }
-}
+async function ensureAuthenticated(codebuddyPath: string, timeoutMs: number): Promise<void> {
+  if (process.env.CODEBUDDY_API_KEY || process.env.CODEBUDDY_AUTH_TOKEN) return;
 
-function isLikelyLoggedIn(): boolean {
-  if (process.env.CODEBUDDY_API_KEY) return true;
-  if (process.env.CODEBUDDY_AUTH_TOKEN) return true;
+  const r = await unstable_v2_authenticate({
+    pathToCodebuddyCode: codebuddyPath,
+    env: {
+      CODEBUDDY_CODE_PATH: codebuddyPath,
+    },
+    timeout: timeoutMs,
+    onAuthUrl: (authState) => {
+      writeEvent({
+        type: "message",
+        role: "system",
+        content: [
+          "CodeBuddy authentication required.",
+          "Open this URL to sign in (you can use your phone):",
+          authState.authUrl,
+          "",
+          "Waiting for sign-in to complete...",
+        ].join("\n"),
+      });
+    },
+  });
 
-  const home = os.homedir();
-  return fileExistsNonEmpty(path.join(home, ".codebuddy-cli", "oauth_creds.json"));
+  const who =
+    r.userinfo.userName ||
+    r.userinfo.userNickname ||
+    (r.userinfo.userId ? `userId=${r.userinfo.userId}` : "unknown");
+
+  writeEvent({ type: "message", role: "system", content: `Authenticated as: ${who}` });
 }
 
 function resolveBundledCodebuddyPath(): string | null {
@@ -100,6 +120,8 @@ function detectAuthRequiredViaCli(codebuddyPath: string, model: string | undefin
 async function run(): Promise<number> {
   const start = stableNowMs();
   const args = parseArgs(process.argv.slice(2));
+  const deadlineMs = start + args.timeoutMs;
+  const minQueryBudgetMs = 15_000;
 
   const prompt = normalizePrompt(await readAllStdin());
   if (!prompt) {
@@ -122,14 +144,35 @@ async function run(): Promise<number> {
     return 1;
   }
 
-  // Best-effort auth precheck. If credentials are missing, exit early with clear guidance.
-  if (!isLikelyLoggedIn() && !process.env.CODEBUDDY_API_KEY && !process.env.CODEBUDDY_AUTH_TOKEN) {
-    writeEvent({ type: "error", code: "auth_required", message: authHelpText() });
+  // Proactively authenticate (SDK-managed external link flow). This persists credentials for future runs.
+  try {
+    const remainingMs = Math.max(0, deadlineMs - stableNowMs());
+    const authTimeoutMs = Math.max(0, remainingMs - minQueryBudgetMs);
+    if (authTimeoutMs > 0) {
+      await ensureAuthenticated(bundledCodebuddy, authTimeoutMs);
+    }
+  } catch (e) {
+    writeEvent({
+      type: "error",
+      code: "auth_required",
+      message: `${authHelpText()}\n\nDetails: ${String(e)}`,
+    });
     writeEvent({ type: "result", status: "error", elapsed_ms: stableNowMs() - start });
     return 3;
   }
 
   const toolNameById = new Map<string, string>();
+
+  const agents = {
+    default: {
+      description: "Default assistant for qrenderdoc (RenderDoc AI integration).",
+      prompt: [
+        "You are an AI assistant embedded in qrenderdoc (RenderDoc).",
+        "You may call allow-listed tools to inspect the current capture context.",
+        "If authentication is required, instruct the user how to login.",
+      ].join("\n"),
+    },
+  } as const;
 
   const renderdocServer = createSdkMcpServer({
     name: "renderdoc",
@@ -190,11 +233,12 @@ async function run(): Promise<number> {
   let canceled = false;
   let cancelReason: "signal" | "timeout" | null = null;
 
+  const remainingForQueryMs = Math.max(0, deadlineMs - stableNowMs());
   const timeout = setTimeout(() => {
     canceled = true;
     cancelReason = "timeout";
     abortController.abort();
-  }, args.timeoutMs);
+  }, remainingForQueryMs);
 
   try {
     const q = query({
@@ -202,6 +246,10 @@ async function run(): Promise<number> {
       options: {
         abortController,
         model: args.model,
+        // Explicitly point the SDK at the CodeBuddy Code CLI wrapper. On Windows the SDK does not
+        // consider options.env for resolving the executable path.
+        pathToCodebuddyCode: bundledCodebuddy,
+        agents,
         permissionMode: "dontAsk",
         // Reuse existing CLI credentials/settings from user profile by default.
         settingSources: ["user"],

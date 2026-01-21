@@ -1,363 +1,356 @@
 #include "AIBridge.h"
 
 #include <QCoreApplication>
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
+#include <QDateTime>
 #include <QHostAddress>
-#include <QStandardPaths>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QMetaType>
 #include <QTcpServer>
+#include <QTcpSocket>
 #include <QThread>
 #include <QUuid>
 
 #include "Code/Interface/QRDInterface.h"
-#include "Code/pyrenderdoc/PythonContext.h"
+#include "Code/QRDUtils.h"
 
-static const char kBridgeScriptName[] = "rdai_bridge.py";
-
-static QString DefaultBridgeScript()
+static qint64 NowMs()
 {
-  return QString::fromUtf8(R"PY(
-import json
-import threading
-import time
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from socketserver import ThreadingMixIn
-
-_rdai_token = None
-_rdai_server = None
-_rdai_thread = None
-
-def _rdai_now_ms():
-  return int(time.time() * 1000)
-
-def _rdai_api_string(api_props):
-  try:
-    s = str(api_props.pipelineType)
-    if "." in s:
-      return s.split(".")[-1]
-    return s
-  except Exception:
-    return None
-
-def _rdai_get_context():
-  capture_path = None
-  api = None
-  event_id = 0
-  event_name = None
-
-  try:
-    ctx = globals().get("pyrenderdoc", None)
-    if ctx is None:
-      return {
-        "capture_path": None,
-        "api": None,
-        "event_id": 0,
-        "event_name": None,
-      }
-
-    if ctx.IsCaptureLoaded():
-      capture_path = ctx.GetCaptureFilename()
-
-      api_props = ctx.APIProps()
-      api = _rdai_api_string(api_props)
-
-      event_id = int(ctx.CurEvent())
-
-      act = ctx.CurAction()
-      if act is not None:
-        n = None
-        try:
-          if hasattr(act, "customName") and act.customName:
-            n = act.customName
-        except Exception:
-          n = None
-        if not n:
-          try:
-            if hasattr(act, "name") and act.name:
-              n = act.name
-          except Exception:
-            n = None
-        event_name = n
-  except Exception:
-    pass
-
-  return {
-    "capture_path": capture_path,
-    "api": api,
-    "event_id": event_id,
-    "event_name": event_name,
-  }
-
-class _ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
-  daemon_threads = True
-
-class _Handler(BaseHTTPRequestHandler):
-  protocol_version = "HTTP/1.1"
-
-  def log_message(self, fmt, *args):
-    return
-
-  def _send_json(self, http_code, obj):
-    data = json.dumps(obj, separators=(",", ":")).encode("utf-8")
-    self.send_response(http_code)
-    self.send_header("Content-Type", "application/json")
-    self.send_header("Content-Length", str(len(data)))
-    self.end_headers()
-    self.wfile.write(data)
-
-  def _send_error(self, req_id, code, message, data=None, http_code=200):
-    err = {"code": code, "message": message}
-    if data is not None:
-      err["data"] = data
-    self._send_json(http_code, {"jsonrpc": "2.0", "id": req_id, "error": err})
-
-  def do_POST(self):
-    start_ms = _rdai_now_ms()
-    req_id = None
-    method = None
-    ok = False
-    http_code = 200
-
-    try:
-      if self.path != "/rpc":
-        self.send_response(404)
-        self.end_headers()
-        return
-
-      auth = self.headers.get("Authorization", "")
-      if not auth.startswith("Bearer "):
-        http_code = 401
-        self._send_error(None, -32001, "unauthorized", http_code=http_code)
-        return
-
-      token = auth[len("Bearer "):]
-      if token != _rdai_token:
-        http_code = 401
-        self._send_error(None, -32001, "unauthorized", http_code=http_code)
-        return
-
-      try:
-        length = int(self.headers.get("Content-Length", "0"))
-      except Exception:
-        length = 0
-
-      raw = self.rfile.read(length).decode("utf-8") if length > 0 else ""
-
-      try:
-        req = json.loads(raw)
-      except Exception as e:
-        self._send_error(None, -32700, "parse error", data=str(e))
-        return
-
-      req_id = req.get("id", None)
-
-      if req.get("jsonrpc") != "2.0" or "method" not in req:
-        self._send_error(req_id, -32600, "invalid request")
-        return
-
-      method = req.get("method", None)
-
-      if method == "renderdoc.get_context":
-        result = _rdai_get_context()
-        ok = True
-        self._send_json(200, {"jsonrpc": "2.0", "id": req_id, "result": result})
-        return
-
-      self._send_error(req_id, -32601, "method not found")
-    except Exception as e:
-      self._send_error(req_id, -32000, "server error", data=str(e))
-    finally:
-      elapsed_ms = _rdai_now_ms() - start_ms
-      status = "ok" if ok else "error"
-      rid = req_id if req_id is not None else ""
-      m = method if method is not None else ""
-      # Logs are intentionally low-detail and never include tokens or request bodies.
-      print("RDAI_BRIDGE request_id=%s method=%s status=%s elapsed_ms=%d" % (rid, m, status, elapsed_ms))
-
-def rdai_bridge_start(port, token):
-  global _rdai_token, _rdai_server, _rdai_thread
-
-  if _rdai_server is not None:
-    return
-
-  _rdai_token = token
-  _rdai_server = _ThreadingHTTPServer(("127.0.0.1", int(port)), _Handler)
-  _rdai_thread = threading.Thread(target=_rdai_server.serve_forever, name="rdai_bridge", daemon=True)
-  _rdai_thread.start()
-  print("RDAI_BRIDGE started port=%d" % _rdai_server.server_port)
-
-def rdai_bridge_stop():
-  global _rdai_server, _rdai_thread
-
-  if _rdai_server is None:
-    return
-
-  try:
-    _rdai_server.shutdown()
-  except Exception:
-    pass
-
-  try:
-    _rdai_server.server_close()
-  except Exception:
-    pass
-
-  _rdai_server = None
-  _rdai_thread = None
-  print("RDAI_BRIDGE stopped")
-)PY");
+  return QDateTime::currentMSecsSinceEpoch();
 }
 
-static QString GetBridgeScriptPath()
+static QByteArray HttpReasonPhrase(int code)
 {
-  QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-  if(base.isEmpty())
-    return QString();
-
-  QDir dir(base);
-  dir.mkpath(lit("ai"));
-  dir.cd(lit("ai"));
-  return dir.absoluteFilePath(QString::fromUtf8(kBridgeScriptName));
-}
-
-static QString LoadBridgeScript(const QString &path)
-{
-  QFile f(path);
-  if(!f.open(QIODevice::ReadOnly | QIODevice::Text))
-    return QString();
-
-  return QString::fromUtf8(f.readAll());
-}
-
-static bool EnsureDefaultBridgeScriptExists(const QString &path, QString &error)
-{
-  QFileInfo fi(path);
-  QDir parent(fi.absolutePath());
-  if(!parent.exists() && !parent.mkpath(lit(".")))
+  switch(code)
   {
-    error = QFormatStr("Failed to create directory '%1'").arg(fi.absolutePath());
-    return false;
+    case 200: return "OK";
+    case 400: return "Bad Request";
+    case 401: return "Unauthorized";
+    case 404: return "Not Found";
+    default: return "OK";
   }
-
-  if(fi.exists())
-    return true;
-
-  QFile f(path);
-  if(!f.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text))
-  {
-    error = QFormatStr("Failed to write '%1'").arg(path);
-    return false;
-  }
-
-  QByteArray bytes = DefaultBridgeScript().toUtf8();
-  if(f.write(bytes) != bytes.size())
-  {
-    error = QFormatStr("Failed to write '%1'").arg(path);
-    return false;
-  }
-
-  return true;
 }
 
-static uint16_t PickPort()
+static QJsonObject MakeJsonRpcError(const QJsonValue &id, int code, const QString &message,
+                                   const QJsonValue &data = QJsonValue())
 {
-  QTcpServer server;
-  if(!server.listen(QHostAddress::LocalHost, 0))
-    return 0;
+  QJsonObject err;
+  err[lit("code")] = code;
+  err[lit("message")] = message;
+  if(!data.isUndefined())
+    err[lit("data")] = data;
 
-  uint16_t port = (uint16_t)server.serverPort();
-  server.close();
-  return port;
+  QJsonObject resp;
+  resp[lit("jsonrpc")] = lit("2.0");
+  resp[lit("id")] = id;
+  resp[lit("error")] = err;
+  return resp;
 }
 
-AIBridgeWorker::AIBridgeWorker(ICaptureContext &ctx, const QString &token, QObject *parent)
+AIBridgeWorker::AIBridgeWorker(ICaptureContext *ctx, const QString &token, QObject *parent)
     : QObject(parent), m_Ctx(ctx), m_token(token)
 {
 }
 
 void AIBridgeWorker::start()
 {
-  if(m_py)
+  if(m_Server)
     return;
 
-  m_port = PickPort();
-  if(m_port == 0)
+  m_Server = new QTcpServer(this);
+
+  if(!m_Server->listen(QHostAddress::LocalHost, 0))
   {
-    emit error(lit("Failed to pick a localhost port for AI bridge"));
+    emit error(lit("Failed to start localhost listener for AI bridge"));
+    m_Server->deleteLater();
+    m_Server = NULL;
     return;
   }
 
-  m_py = new PythonContextHandle();
+  m_port = (uint16_t)m_Server->serverPort();
+  QObject::connect(m_Server, &QTcpServer::newConnection, this,
+                   &AIBridgeWorker::acceptPendingConnections);
 
-  QObject::connect(&m_py->ctx(), &PythonContext::exception, this,
-                   [this](const QString &type, const QString &value, int, QList<QString>) {
-                     if(!m_starting)
-                       return;
-                     m_startError = QFormatStr("%1: %2").arg(type).arg(value);
-                   });
-
-  QObject::connect(&m_py->ctx(), &PythonContext::textOutput, this,
-                   [](bool isStdError, const QString &output) {
-                     QString line = output.trimmed();
-                     if(!line.startsWith(lit("RDAI_BRIDGE")))
-                       return;
-
-                     if(isStdError)
-                       qWarning() << line;
-                     else
-                       qInfo() << line;
-                   });
-
-  m_py->ctx().setGlobal("pyrenderdoc", (ICaptureContext *)&m_Ctx);
-
-  QString scriptPath = GetBridgeScriptPath();
-  QString scriptError;
-  QString script;
-
-  if(!scriptPath.isEmpty() && EnsureDefaultBridgeScriptExists(scriptPath, scriptError))
-    script = LoadBridgeScript(scriptPath);
-
-  if(script.isEmpty())
-    script = DefaultBridgeScript();
-
-  m_starting = true;
-  m_startError.clear();
-
-  if(!scriptPath.isEmpty())
-    m_py->ctx().executeString(scriptPath, script);
-  else
-    m_py->ctx().executeString(script);
-
-  QString cmd = QFormatStr("rdai_bridge_start(%1, \"%2\")").arg(m_port).arg(m_token);
-  m_py->ctx().executeString(cmd);
-
-  m_starting = false;
-
-  if(!m_startError.isEmpty())
-  {
-    emit error(QFormatStr("AI bridge failed to start: %1").arg(m_startError));
-    return;
-  }
-
+  qInfo() << "RDAI_BRIDGE started port=" << m_port;
   emit started(m_port);
 }
 
 void AIBridgeWorker::stop()
 {
-  if(!m_py)
+  if(!m_Server)
   {
     emit stopped();
     return;
   }
 
-  m_py->ctx().executeString(lit("rdai_bridge_stop()"));
-  delete m_py;
-  m_py = NULL;
+  for(QTcpSocket *sock : m_Buffers.keys())
+  {
+    QObject::disconnect(sock, NULL, this, NULL);
+    sock->disconnectFromHost();
+    sock->deleteLater();
+  }
+
+  m_Buffers.clear();
+
+  m_Server->close();
+  m_Server->deleteLater();
+  m_Server = NULL;
+  m_port = 0;
+
+  qInfo() << "RDAI_BRIDGE stopped";
   emit stopped();
 }
 
-AIBridge::AIBridge(ICaptureContext &ctx, QObject *parent) : QObject(parent), m_Ctx(ctx)
+void AIBridgeWorker::acceptPendingConnections()
+{
+  if(!m_Server)
+    return;
+
+  while(m_Server->hasPendingConnections())
+  {
+    QTcpSocket *sock = m_Server->nextPendingConnection();
+    if(!sock)
+      continue;
+
+    sock->setParent(this);
+
+    m_Buffers.insert(sock, QByteArray());
+
+    QObject::connect(sock, &QTcpSocket::readyRead, this,
+                     [this, sock]() { onSocketReadyRead(sock); });
+    QObject::connect(sock, &QTcpSocket::disconnected, this, [this, sock]() {
+      m_Buffers.remove(sock);
+      sock->deleteLater();
+    });
+
+    // If the client sent data immediately after connecting, readyRead may not be emitted after we
+    // connect the signal, so process any already-buffered bytes.
+    if(sock->bytesAvailable() > 0)
+      onSocketReadyRead(sock);
+  }
+}
+
+void AIBridgeWorker::sendResponse(QTcpSocket *socket, int httpCode, const QByteArray &contentType,
+                                 const QByteArray &body)
+{
+  if(!socket)
+    return;
+
+  QByteArray resp;
+  resp.reserve(256 + body.size());
+
+  resp += "HTTP/1.1 ";
+  resp += QByteArray::number(httpCode);
+  resp += " ";
+  resp += HttpReasonPhrase(httpCode);
+  resp += "\r\n";
+
+  if(!contentType.isEmpty())
+  {
+    resp += "Content-Type: ";
+    resp += contentType;
+    resp += "\r\n";
+  }
+
+  resp += "Content-Length: ";
+  resp += QByteArray::number(body.size());
+  resp += "\r\n";
+  resp += "Connection: close\r\n";
+  resp += "\r\n";
+  resp += body;
+
+  socket->write(resp);
+  socket->disconnectFromHost();
+}
+
+void AIBridgeWorker::onSocketReadyRead(QTcpSocket *socket)
+{
+  if(!socket)
+    return;
+
+  QByteArray &buf = m_Buffers[socket];
+  buf.append(socket->readAll());
+
+  // Only handle a single request per connection.
+  const int headerEnd = buf.indexOf("\r\n\r\n");
+  if(headerEnd < 0)
+    return;
+
+  const QByteArray headerBlock = buf.left(headerEnd);
+  const QByteArray bodyBlock = buf.mid(headerEnd + 4);
+
+  QList<QByteArray> headerLines = headerBlock.split('\n');
+  if(headerLines.isEmpty())
+  {
+    sendResponse(socket, 400, "text/plain", QByteArray());
+    return;
+  }
+
+  const QByteArray requestLine = headerLines.takeFirst().trimmed();
+  const QList<QByteArray> requestParts = requestLine.split(' ');
+  if(requestParts.size() < 2)
+  {
+    sendResponse(socket, 400, "text/plain", QByteArray());
+    return;
+  }
+
+  const QByteArray httpMethod = requestParts[0];
+  const QByteArray httpPath = requestParts[1];
+
+  QHash<QByteArray, QByteArray> headers;
+  for(QByteArray raw : headerLines)
+  {
+    raw.replace('\r', "");
+    raw = raw.trimmed();
+    if(raw.isEmpty())
+      continue;
+
+    const int colon = raw.indexOf(':');
+    if(colon <= 0)
+      continue;
+
+    const QByteArray key = raw.left(colon).trimmed().toLower();
+    const QByteArray val = raw.mid(colon + 1).trimmed();
+    headers.insert(key, val);
+  }
+
+  bool okLen = false;
+  int contentLength = headers.value("content-length").toInt(&okLen);
+  if(!okLen || contentLength < 0)
+    contentLength = 0;
+
+  if(bodyBlock.size() < contentLength)
+    return;
+
+  const QByteArray body = bodyBlock.left(contentLength);
+
+  // Prevent re-processing if more data arrives.
+  m_Buffers[socket].clear();
+
+  const qint64 startMs = NowMs();
+  QString rpcMethod;
+  QString requestId;
+
+  auto finishLog = [&](const char *status) {
+    const qint64 elapsed = NowMs() - startMs;
+    qInfo() << "RDAI_BRIDGE request_id=" << requestId << "method=" << rpcMethod
+            << "status=" << status << "elapsed_ms=" << elapsed;
+  };
+
+  if(httpMethod != "POST" || httpPath != "/rpc")
+  {
+    sendResponse(socket, 404, "text/plain", QByteArray());
+    finishLog("error");
+    return;
+  }
+
+  const QByteArray auth = headers.value("authorization");
+  const QByteArray bearerPrefix = "Bearer ";
+  const QByteArray presentedToken =
+      auth.startsWith(bearerPrefix) ? auth.mid(bearerPrefix.size()).trimmed() : QByteArray();
+
+  if(presentedToken.isEmpty() || presentedToken != m_token.toUtf8())
+  {
+    QJsonObject resp = MakeJsonRpcError(QJsonValue(QJsonValue::Null), -32001, lit("unauthorized"));
+    sendResponse(socket, 401, "application/json",
+                 QJsonDocument(resp).toJson(QJsonDocument::Compact));
+    finishLog("error");
+    return;
+  }
+
+  QJsonParseError parseErr = {};
+  QJsonDocument doc = QJsonDocument::fromJson(body, &parseErr);
+  if(parseErr.error != QJsonParseError::NoError || !doc.isObject())
+  {
+    QJsonObject resp = MakeJsonRpcError(QJsonValue(QJsonValue::Null), -32700, lit("parse error"),
+                                        parseErr.errorString());
+    sendResponse(socket, 200, "application/json",
+                 QJsonDocument(resp).toJson(QJsonDocument::Compact));
+    finishLog("error");
+    return;
+  }
+
+  const QJsonObject req = doc.object();
+  const QJsonValue idVal =
+      req.contains(lit("id")) ? req.value(lit("id")) : QJsonValue(QJsonValue::Null);
+
+  if(idVal.isString())
+    requestId = idVal.toString();
+  else if(idVal.isDouble())
+    requestId = QString::number((qint64)idVal.toDouble());
+
+  if(req.value(lit("jsonrpc")).toString() != lit("2.0"))
+  {
+    QJsonObject resp = MakeJsonRpcError(idVal, -32600, lit("invalid request"));
+    sendResponse(socket, 200, "application/json",
+                 QJsonDocument(resp).toJson(QJsonDocument::Compact));
+    finishLog("error");
+    return;
+  }
+
+  rpcMethod = req.value(lit("method")).toString();
+  if(rpcMethod.isEmpty())
+  {
+    QJsonObject resp = MakeJsonRpcError(idVal, -32600, lit("invalid request"));
+    sendResponse(socket, 200, "application/json",
+                 QJsonDocument(resp).toJson(QJsonDocument::Compact));
+    finishLog("error");
+    return;
+  }
+
+  if(rpcMethod == lit("renderdoc.get_context"))
+  {
+    QJsonObject result;
+
+    if(m_Ctx && m_Ctx->IsCaptureLoaded())
+    {
+      const QString capturePath = QString(m_Ctx->GetCaptureFilename());
+      const QString api = ToQStr(m_Ctx->APIProps().pipelineType);
+      const uint32_t eventId = m_Ctx->CurEvent();
+
+      QString eventName;
+      const ActionDescription *act = m_Ctx->CurAction();
+      if(act)
+      {
+        if(!act->customName.empty())
+          eventName = QString(act->customName);
+        else
+          eventName = QString(act->GetName(m_Ctx->GetStructuredFile()));
+      }
+
+      result[lit("capture_path")] =
+          capturePath.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(capturePath);
+      result[lit("api")] = api.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(api);
+      result[lit("event_id")] = (int)eventId;
+      result[lit("event_name")] =
+          eventName.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(eventName);
+    }
+    else
+    {
+      result[lit("capture_path")] = QJsonValue(QJsonValue::Null);
+      result[lit("api")] = QJsonValue(QJsonValue::Null);
+      result[lit("event_id")] = 0;
+      result[lit("event_name")] = QJsonValue(QJsonValue::Null);
+    }
+
+    QJsonObject resp;
+    resp[lit("jsonrpc")] = lit("2.0");
+    resp[lit("id")] = idVal;
+    resp[lit("result")] = result;
+
+    sendResponse(socket, 200, "application/json",
+                 QJsonDocument(resp).toJson(QJsonDocument::Compact));
+    finishLog("ok");
+    return;
+  }
+
+  QJsonObject resp = MakeJsonRpcError(idVal, -32601, lit("method not found"));
+  sendResponse(socket, 200, "application/json", QJsonDocument(resp).toJson(QJsonDocument::Compact));
+  finishLog("error");
+}
+
+AIBridge::AIBridge(ICaptureContext *ctx, QObject *parent) : QObject(parent), m_Ctx(ctx)
 {
   QObject::connect(qApp, &QCoreApplication::aboutToQuit, this, &AIBridge::Stop);
 }
@@ -380,14 +373,26 @@ void AIBridge::Start()
   if(m_thread)
     return;
 
+  // Cross-thread queued connections require argument types to be registered with Qt's meta system.
+  qRegisterMetaType<uint16_t>("uint16_t");
+
   m_token = generateToken();
 
   QThread *thread = new QThread(this);
   AIBridgeWorker *worker = new AIBridgeWorker(m_Ctx, m_token);
 
   worker->moveToThread(thread);
+  if(worker->thread() != thread)
+  {
+    emit BridgeError(lit("Failed to move AI bridge worker to thread"));
+    thread->deleteLater();
+    worker->deleteLater();
+    return;
+  }
 
-  QObject::connect(thread, &QThread::started, worker, &AIBridgeWorker::start);
+  // QThread::started is emitted from the worker thread. Use a direct connection so we don't depend
+  // on the worker thread's event loop being up before start() runs.
+  QObject::connect(thread, &QThread::started, worker, &AIBridgeWorker::start, Qt::DirectConnection);
   QObject::connect(worker, &AIBridgeWorker::started, this, &AIBridge::onWorkerStarted);
   QObject::connect(worker, &AIBridgeWorker::error, this, &AIBridge::onWorkerError);
   QObject::connect(thread, &QThread::finished, worker, &QObject::deleteLater);
@@ -396,6 +401,10 @@ void AIBridge::Start()
   m_worker = worker;
 
   thread->start();
+
+  // Extra safety: make sure start() is queued to the worker thread even if the started signal is
+  // missed for any reason.
+  QMetaObject::invokeMethod(worker, "start", Qt::QueuedConnection);
 }
 
 void AIBridge::Stop()
@@ -447,3 +456,295 @@ QString AIBridge::generateToken()
 
   return QString::fromUtf8(bytes.toHex());
 }
+
+#if ENABLE_UNIT_TESTS
+
+#include "3rdparty/catch/catch.hpp"
+
+#include <QEventLoop>
+#include <QTimer>
+
+struct HttpResponse
+{
+  int statusCode = 0;
+  QHash<QByteArray, QByteArray> headers;
+  QByteArray body;
+};
+
+static HttpResponse ParseHttpResponse(const QByteArray &raw)
+{
+  HttpResponse ret;
+
+  const int headerEnd = raw.indexOf("\r\n\r\n");
+  REQUIRE(headerEnd >= 0);
+
+  const QByteArray headerBlock = raw.left(headerEnd);
+  ret.body = raw.mid(headerEnd + 4);
+
+  QList<QByteArray> headerLines = headerBlock.split('\n');
+  REQUIRE(!headerLines.isEmpty());
+
+  const QByteArray statusLine = headerLines.takeFirst().trimmed();
+  const QList<QByteArray> statusParts = statusLine.split(' ');
+  REQUIRE(statusParts.size() >= 2);
+
+  bool okStatus = false;
+  ret.statusCode = statusParts[1].toInt(&okStatus);
+  REQUIRE(okStatus);
+
+  for(QByteArray rawLine : headerLines)
+  {
+    rawLine.replace('\r', "");
+    rawLine = rawLine.trimmed();
+    if(rawLine.isEmpty())
+      continue;
+
+    const int colon = rawLine.indexOf(':');
+    if(colon <= 0)
+      continue;
+
+    const QByteArray key = rawLine.left(colon).trimmed().toLower();
+    const QByteArray val = rawLine.mid(colon + 1).trimmed();
+    ret.headers.insert(key, val);
+  }
+
+  bool okLen = false;
+  const int contentLen = ret.headers.value("content-length").toInt(&okLen);
+  if(okLen && contentLen >= 0 && ret.body.size() >= contentLen)
+    ret.body = ret.body.left(contentLen);
+
+  return ret;
+}
+
+static QByteArray MakeHttpPostRequest(const QByteArray &path, const QByteArray &authHeaderValue,
+                                     const QByteArray &body)
+{
+  QByteArray req;
+  req += "POST ";
+  req += path;
+  req += " HTTP/1.1\r\n";
+  req += "Host: 127.0.0.1\r\n";
+  req += "Content-Type: application/json\r\n";
+  req += "Content-Length: ";
+  req += QByteArray::number(body.size());
+  req += "\r\n";
+
+  if(!authHeaderValue.isEmpty())
+  {
+    req += "Authorization: ";
+    req += authHeaderValue;
+    req += "\r\n";
+  }
+
+  req += "Connection: close\r\n";
+  req += "\r\n";
+  req += body;
+  return req;
+}
+
+static QByteArray SendRequest(uint16_t port, const QByteArray &request)
+{
+  QTcpSocket sock;
+  QByteArray resp;
+  QEventLoop loop;
+  QTimer timer;
+  timer.setSingleShot(true);
+
+  QObject::connect(&sock, &QTcpSocket::readyRead, [&sock, &resp]() { resp += sock.readAll(); });
+  QObject::connect(&sock, &QTcpSocket::disconnected, &loop, &QEventLoop::quit);
+  QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+
+  sock.connectToHost(QHostAddress::LocalHost, port);
+
+  REQUIRE(sock.waitForConnected(2000));
+
+  const qint64 written = sock.write(request);
+  REQUIRE(written == request.size());
+  REQUIRE(sock.waitForBytesWritten(2000));
+
+  timer.start(2000);
+  loop.exec();
+
+  if(sock.state() != QAbstractSocket::UnconnectedState)
+    sock.disconnectFromHost();
+
+  resp += sock.readAll();
+
+  return resp;
+}
+
+static QJsonObject ParseJsonObject(const QByteArray &bytes)
+{
+  QJsonParseError err = {};
+  QJsonDocument doc = QJsonDocument::fromJson(bytes, &err);
+  REQUIRE(err.error == QJsonParseError::NoError);
+  REQUIRE(doc.isObject());
+  return doc.object();
+}
+
+TEST_CASE("AI bridge enforces auth and JSON-RPC responses", "[ai][bridge]")
+{
+  const QString token = lit("good_token");
+
+  AIBridgeWorker worker(NULL, token);
+  uint16_t port = 0;
+  QObject::connect(&worker, &AIBridgeWorker::started, [&port](uint16_t p) { port = p; });
+
+  worker.start();
+  REQUIRE(port != 0);
+
+  const QJsonObject req = {
+      {lit("jsonrpc"), lit("2.0")},
+      {lit("id"), lit("x")},
+      {lit("method"), lit("renderdoc.get_context")},
+  };
+
+  const QByteArray json = QJsonDocument(req).toJson(QJsonDocument::Compact);
+
+  SECTION("rejects missing bearer token")
+  {
+    const QByteArray httpReq = MakeHttpPostRequest("/rpc", QByteArray(), json);
+    const HttpResponse resp = ParseHttpResponse(SendRequest(port, httpReq));
+    CHECK(resp.statusCode == 401);
+
+    const QJsonObject obj = ParseJsonObject(resp.body);
+    CHECK(obj.value(lit("jsonrpc")).toString() == lit("2.0"));
+    CHECK(obj.value(lit("id")).isNull());
+    const QJsonObject err = obj.value(lit("error")).toObject();
+    CHECK(err.value(lit("code")).toInt() == -32001);
+    CHECK(err.value(lit("message")).toString() == lit("unauthorized"));
+  }
+
+  SECTION("returns context for authorized requests")
+  {
+    const QByteArray auth = QByteArray("Bearer ") + token.toUtf8();
+    const QByteArray httpReq = MakeHttpPostRequest("/rpc", auth, json);
+    const HttpResponse resp = ParseHttpResponse(SendRequest(port, httpReq));
+    CHECK(resp.statusCode == 200);
+
+    const QJsonObject obj = ParseJsonObject(resp.body);
+    CHECK(obj.value(lit("jsonrpc")).toString() == lit("2.0"));
+    CHECK(obj.value(lit("id")).toString() == lit("x"));
+
+    const QJsonObject result = obj.value(lit("result")).toObject();
+    CHECK(result.contains(lit("capture_path")));
+    CHECK(result.contains(lit("api")));
+    CHECK(result.contains(lit("event_id")));
+    CHECK(result.contains(lit("event_name")));
+    CHECK(result.value(lit("capture_path")).isNull());
+    CHECK(result.value(lit("api")).isNull());
+    CHECK(result.value(lit("event_id")).toInt() == 0);
+    CHECK(result.value(lit("event_name")).isNull());
+  }
+
+  SECTION("returns parse error for invalid JSON")
+  {
+    const QByteArray auth = QByteArray("Bearer ") + token.toUtf8();
+    const QByteArray httpReq = MakeHttpPostRequest("/rpc", auth, "{");
+    const HttpResponse resp = ParseHttpResponse(SendRequest(port, httpReq));
+    CHECK(resp.statusCode == 200);
+
+    const QJsonObject obj = ParseJsonObject(resp.body);
+    const QJsonObject err = obj.value(lit("error")).toObject();
+    CHECK(err.value(lit("code")).toInt() == -32700);
+    CHECK(err.value(lit("message")).toString() == lit("parse error"));
+  }
+
+  SECTION("returns invalid request for missing method")
+  {
+    const QByteArray auth = QByteArray("Bearer ") + token.toUtf8();
+    const QJsonObject badReq = {
+        {lit("jsonrpc"), lit("2.0")},
+        {lit("id"), lit("x")},
+    };
+    const QByteArray httpReq =
+        MakeHttpPostRequest("/rpc", auth, QJsonDocument(badReq).toJson(QJsonDocument::Compact));
+    const HttpResponse resp = ParseHttpResponse(SendRequest(port, httpReq));
+    CHECK(resp.statusCode == 200);
+
+    const QJsonObject obj = ParseJsonObject(resp.body);
+    const QJsonObject err = obj.value(lit("error")).toObject();
+    CHECK(err.value(lit("code")).toInt() == -32600);
+    CHECK(err.value(lit("message")).toString() == lit("invalid request"));
+  }
+
+  SECTION("returns method not found")
+  {
+    const QByteArray auth = QByteArray("Bearer ") + token.toUtf8();
+    const QJsonObject badReq = {
+        {lit("jsonrpc"), lit("2.0")},
+        {lit("id"), lit("x")},
+        {lit("method"), lit("renderdoc.nope")},
+    };
+    const QByteArray httpReq =
+        MakeHttpPostRequest("/rpc", auth, QJsonDocument(badReq).toJson(QJsonDocument::Compact));
+    const HttpResponse resp = ParseHttpResponse(SendRequest(port, httpReq));
+    CHECK(resp.statusCode == 200);
+
+    const QJsonObject obj = ParseJsonObject(resp.body);
+    const QJsonObject err = obj.value(lit("error")).toObject();
+    CHECK(err.value(lit("code")).toInt() == -32601);
+    CHECK(err.value(lit("message")).toString() == lit("method not found"));
+  }
+
+  worker.stop();
+}
+
+TEST_CASE("AI bridge starts and becomes ready", "[ai][bridge]")
+{
+  AIBridge bridge(NULL);
+
+  bool started = false;
+  QString startError;
+  QEventLoop loop;
+  QTimer timer;
+  timer.setSingleShot(true);
+
+  QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+  QObject::connect(&bridge, &AIBridge::BridgeStarted, &loop, &QEventLoop::quit);
+  QObject::connect(&bridge, &AIBridge::BridgeStarted, [&started]() { started = true; });
+  QObject::connect(&bridge, &AIBridge::BridgeError, [&startError, &loop](const QString &msg) {
+    startError = msg;
+    loop.quit();
+  });
+
+  timer.start(10000);
+  bridge.Start();
+
+  QThread *thread = bridge.findChild<QThread *>();
+  INFO(QFormatStr("bridge_thread=%1 running=%2")
+           .arg((quintptr)thread, 0, 16)
+           .arg(thread ? (thread->isRunning() ? 1 : 0) : -1));
+
+  loop.exec();
+
+  INFO(startError.toUtf8().data());
+  REQUIRE(started);
+  REQUIRE(bridge.IsRunning());
+  REQUIRE(bridge.Port() != 0);
+  REQUIRE(!bridge.RpcUrl().isEmpty());
+  REQUIRE(!bridge.Token().isEmpty());
+
+  const QJsonObject req = {
+      {lit("jsonrpc"), lit("2.0")},
+      {lit("id"), lit("x")},
+      {lit("method"), lit("renderdoc.get_context")},
+  };
+
+  const QByteArray auth = QByteArray("Bearer ") + bridge.Token().toUtf8();
+  const QByteArray httpReq =
+      MakeHttpPostRequest("/rpc", auth, QJsonDocument(req).toJson(QJsonDocument::Compact));
+  const HttpResponse resp = ParseHttpResponse(SendRequest(bridge.Port(), httpReq));
+
+  CHECK(resp.statusCode == 200);
+  const QJsonObject obj = ParseJsonObject(resp.body);
+  const QJsonObject result = obj.value(lit("result")).toObject();
+  CHECK(result.value(lit("event_id")).toInt() == 0);
+
+  bridge.Stop();
+  CHECK(!bridge.IsRunning());
+  CHECK(bridge.RpcUrl().isEmpty());
+  CHECK(bridge.Token().isEmpty());
+}
+
+#endif    // ENABLE_UNIT_TESTS

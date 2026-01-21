@@ -1,21 +1,24 @@
 #pragma once
 
+#include <QByteArray>
+#include <QHash>
 #include <QObject>
 #include <QString>
 
 #include <stdint.h>
 
 struct ICaptureContext;
-struct PythonContextHandle;
 
 class QThread;
+class QTcpServer;
+class QTcpSocket;
 
 class AIBridgeWorker : public QObject
 {
   Q_OBJECT
 
 public:
-  AIBridgeWorker(ICaptureContext &ctx, const QString &token, QObject *parent = NULL);
+  AIBridgeWorker(ICaptureContext *ctx, const QString &token, QObject *parent = NULL);
 
 public slots:
   void start();
@@ -27,7 +30,12 @@ signals:
   void error(const QString &message);
 
 private:
-  ICaptureContext &m_Ctx;
+  void acceptPendingConnections();
+  void onSocketReadyRead(QTcpSocket *socket);
+  void sendResponse(QTcpSocket *socket, int httpCode, const QByteArray &contentType,
+                    const QByteArray &body);
+
+  ICaptureContext *m_Ctx = NULL;
   QString m_token;
 
   uint16_t m_port = 0;
@@ -35,7 +43,8 @@ private:
   bool m_starting = false;
   QString m_startError;
 
-  PythonContextHandle *m_py = NULL;
+  QTcpServer *m_Server = NULL;
+  QHash<QTcpSocket *, QByteArray> m_Buffers;
 };
 
 class AIBridge : public QObject
@@ -43,7 +52,7 @@ class AIBridge : public QObject
   Q_OBJECT
 
 public:
-  explicit AIBridge(ICaptureContext &ctx, QObject *parent = NULL);
+  explicit AIBridge(ICaptureContext *ctx, QObject *parent = NULL);
   ~AIBridge();
 
   bool IsRunning() const { return m_running; }
@@ -66,7 +75,7 @@ private slots:
 private:
   static QString generateToken();
 
-  ICaptureContext &m_Ctx;
+  ICaptureContext *m_Ctx = NULL;
 
   QThread *m_thread = NULL;
   AIBridgeWorker *m_worker = NULL;

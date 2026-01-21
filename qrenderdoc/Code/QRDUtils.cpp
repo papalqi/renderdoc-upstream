@@ -36,6 +36,7 @@
 #include <QGuiApplication>
 #include <QHeaderView>
 #include <QJsonDocument>
+#include <QJsonParseError>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -71,6 +72,20 @@ template <>
 rdcstr DoStringise(const uint16_t &el)
 {
   return QString::number(el);
+}
+
+// qrenderdoc uses QString heavily and unit tests may need to print them in CHECK/REQUIRE messages.
+template <>
+rdcstr DoStringise(const QString &el)
+{
+  return el;
+}
+
+// likewise for Qt enum types used in unit tests.
+template <>
+rdcstr DoStringise(const QJsonParseError::ParseError &el)
+{
+  return QString::number((int)el);
 }
 
 // these ones we do by hand as it requires formatting
