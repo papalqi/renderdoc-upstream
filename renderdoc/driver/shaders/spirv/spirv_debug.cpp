@@ -3999,7 +3999,7 @@ void ThreadState::StepNext(bool useDebugState, const uint32_t steps,
 
         QueueSampleGather(Op::ImageFetch, texType, img.GetBindIndex(), ShaderBindIndex(), coord,
                           ShaderVariable(), ShaderVariable(), ShaderVariable(), GatherChannel::Red,
-                          ImageOperandsAndParamDatas(), result);
+                          read.imageOperands, result);
       }
       else
       {
@@ -4882,6 +4882,225 @@ void ThreadState::StepNext(bool useDebugState, const uint32_t steps,
     case Op::SDotAccSat:
     case Op::UDotAccSat:
     case Op::SUDotAccSat:
+    {
+      Id vector1;
+      Id vector2;
+      Id result;
+      ShaderVariable acc;
+      bool leftSigned = true;
+      bool rightSigned = true;
+      PackedVectorFormat packedFormat = PackedVectorFormat::Invalid;
+      bool hasPackedFormat = false;
+      switch(opdata.op)
+      {
+        case Op::SDot:
+        {
+          OpSDot dot(it);
+          vector1 = dot.vector1;
+          vector2 = dot.vector2;
+          result = dot.result;
+          packedFormat = dot.packedVectorFormat;
+          hasPackedFormat = dot.HasPackedVectorFormat();
+          break;
+        }
+        case Op::SDotAccSat:
+        {
+          OpSDotAccSat dot(it);
+          vector1 = dot.vector1;
+          vector2 = dot.vector2;
+          acc = GetSrc(dot.accumulator);
+          result = dot.result;
+          packedFormat = dot.packedVectorFormat;
+          hasPackedFormat = dot.HasPackedVectorFormat();
+          break;
+        }
+        case Op::UDot:
+        {
+          OpUDot dot(it);
+          vector1 = dot.vector1;
+          vector2 = dot.vector2;
+          result = dot.result;
+          leftSigned = false;
+          rightSigned = false;
+          packedFormat = dot.packedVectorFormat;
+          hasPackedFormat = dot.HasPackedVectorFormat();
+          break;
+        }
+        case Op::UDotAccSat:
+        {
+          OpUDotAccSat dot(it);
+          vector1 = dot.vector1;
+          vector2 = dot.vector2;
+          acc = GetSrc(dot.accumulator);
+          result = dot.result;
+          leftSigned = false;
+          rightSigned = false;
+          packedFormat = dot.packedVectorFormat;
+          hasPackedFormat = dot.HasPackedVectorFormat();
+          break;
+        }
+        case Op::SUDot:
+        {
+          OpSUDot dot(it);
+          vector1 = dot.vector1;
+          vector2 = dot.vector2;
+          result = dot.result;
+          rightSigned = false;
+          packedFormat = dot.packedVectorFormat;
+          hasPackedFormat = dot.HasPackedVectorFormat();
+          break;
+        }
+        case Op::SUDotAccSat:
+        {
+          OpSUDotAccSat dot(it);
+          vector1 = dot.vector1;
+          vector2 = dot.vector2;
+          acc = GetSrc(dot.accumulator);
+          result = dot.result;
+          rightSigned = false;
+          packedFormat = dot.packedVectorFormat;
+          hasPackedFormat = dot.HasPackedVectorFormat();
+          break;
+        }
+        default: RDCERR("Unexpected opcode %s", ToStr(opdata.op).c_str()); break;
+      }
+
+      ShaderVariable lhs = GetSrc(vector1);
+      ShaderVariable rhs = GetSrc(vector2);
+
+      RDCASSERTEQUAL(lhs.columns, rhs.columns);
+      // 1x32-bit is a 4x-8bit packed vector
+      if((lhs.columns == 1) && (lhs.type == VarType::SInt || lhs.type == VarType::UInt))
+      {
+        lhs.columns = 4;
+        rhs.columns = 4;
+        lhs.type = (lhs.type == VarType::SInt) ? VarType::SByte : VarType::UByte;
+        rhs.type = (rhs.type == VarType::SInt) ? VarType::SByte : VarType::UByte;
+        if(!hasPackedFormat)
+        {
+          RDCERR("Inputs are packed but opcode does not specify packed format opcode %s",
+                 ToStr(opdata.op).c_str());
+          break;
+        }
+        if(packedFormat != PackedVectorFormat::PackedVectorFormat4x8Bit)
+        {
+          RDCERR("Inputs are packed but opcdode specifies an invalid packed format %u opcode %s",
+                 (uint32_t)packedFormat, ToStr(opdata.op).c_str());
+          break;
+        }
+      }
+      else
+      {
+        if(hasPackedFormat)
+        {
+          RDCERR("Inputs are not packed but opcode does specify packed format opcode %s",
+                 ToStr(opdata.op).c_str());
+          break;
+        }
+      }
+      const DataType &resultType = debugger.GetType(opdata.resultType);
+      ShaderVariable var;
+      var.type = resultType.scalar().Type();
+      var.rows = 1;
+      var.columns = 1;
+      int64_t sMinValue = int64_t(INT64_MIN);
+      int64_t sMaxValue = int64_t(INT64_MAX);
+      if(var.type == VarType::SInt)
+      {
+        sMinValue = int64_t(INT32_MIN);
+        sMaxValue = int64_t(INT32_MAX);
+      }
+      else if(var.type == VarType::SShort)
+      {
+        sMinValue = int64_t(INT16_MIN);
+        sMaxValue = int64_t(INT16_MAX);
+      }
+      else if(var.type == VarType::SByte)
+      {
+        sMinValue = int64_t(INT8_MIN);
+        sMaxValue = int64_t(INT8_MAX);
+      }
+      uint64_t uMaxValue = uint64_t(UINT64_MAX);
+      if(var.type == VarType::UInt)
+      {
+        uMaxValue = uint64_t(UINT32_MAX);
+      }
+      else if(var.type == VarType::UShort)
+      {
+        uMaxValue = uint64_t(UINT16_MAX);
+      }
+      else if(var.type == VarType::UByte)
+      {
+        uMaxValue = uint64_t(UINT8_MAX);
+      }
+
+      if(leftSigned && rightSigned)
+      {
+#undef _IMPL
+#define _IMPL(I, S, U)                                  \
+  int64_t ret(0);                                       \
+  if(!hasPackedFormat)                                  \
+  {                                                     \
+    for(uint8_t c = 0; c < lhs.columns; c++)            \
+      ret += comp<S>(lhs, c) * comp<S>(rhs, c);         \
+  }                                                     \
+  else                                                  \
+  {                                                     \
+    for(uint8_t c = 0; c < lhs.columns; c++)            \
+      ret += (S)lhs.value.s8v[c] * (S)rhs.value.s8v[c]; \
+  }                                                     \
+  ret += comp<S>(acc, 0);                               \
+  ret = RDCCLAMP(ret, sMinValue, sMaxValue);            \
+  comp<S>(var, 0) = (S)ret;
+
+        IMPL_FOR_INT_TYPES(_IMPL);
+      }
+      else if(!leftSigned && !rightSigned)
+      {
+#undef _IMPL
+#define _IMPL(I, S, U)                                  \
+  uint64_t ret(0);                                      \
+  if(!hasPackedFormat)                                  \
+  {                                                     \
+    for(uint8_t c = 0; c < lhs.columns; c++)            \
+      ret += comp<U>(lhs, c) * comp<U>(rhs, c);         \
+  }                                                     \
+  else                                                  \
+  {                                                     \
+    for(uint8_t c = 0; c < lhs.columns; c++)            \
+      ret += (U)lhs.value.u8v[c] * (U)rhs.value.u8v[c]; \
+  }                                                     \
+  ret += comp<U>(acc, 0);                               \
+  ret = RDCMIN(ret, uMaxValue);                         \
+  comp<U>(var, 0) = (U)ret;
+
+        IMPL_FOR_INT_TYPES(_IMPL);
+      }
+      else if(leftSigned && !rightSigned)
+      {
+#undef _IMPL
+#define _IMPL(I, S, U)                                  \
+  int64_t ret(0);                                       \
+  if(!hasPackedFormat)                                  \
+  {                                                     \
+    for(uint8_t c = 0; c < lhs.columns; c++)            \
+      ret += comp<S>(lhs, c) * comp<U>(rhs, c);         \
+  }                                                     \
+  else                                                  \
+  {                                                     \
+    for(uint8_t c = 0; c < lhs.columns; c++)            \
+      ret += (S)lhs.value.s8v[c] * (U)rhs.value.u8v[c]; \
+  }                                                     \
+  ret += comp<S>(acc, 0);                               \
+  ret = RDCCLAMP(ret, sMinValue, sMaxValue);            \
+  comp<S>(var, 0) = (S)ret;
+
+        IMPL_FOR_INT_TYPES(_IMPL);
+      }
+
+      SetDst(result, var);
+      break;
+    }
 
       // legacy/OpenCL/AMD group operations
     case Op::GroupAll:
@@ -4956,7 +5175,7 @@ void ThreadState::StepNext(bool useDebugState, const uint32_t steps,
     case Op::FragmentMaskFetchAMD:
     case Op::FragmentFetchAMD:
     case Op::ImageSampleFootprintNV:
-    case Op::GroupNonUniformPartitionNV:
+    case Op::GroupNonUniformPartitionEXT:
     case Op::WritePackedPrimitiveIndices4x8NV:
     case Op::ReportIntersectionKHR:
     case Op::IgnoreIntersectionNV:
@@ -5160,6 +5379,44 @@ void ThreadState::StepNext(bool useDebugState, const uint32_t steps,
     case Op::CompositeExtractCoopMatQCOM:
     case Op::ExtractSubArrayQCOM:
     case Op::FmaKHR:
+    case Op::BufferPointerEXT:
+    case Op::UntypedImageTexelPointerEXT:
+    case Op::ConstantSizeOfEXT:
+    case Op::HitObjectRecordFromQueryEXT:
+    case Op::HitObjectRecordMissMotionEXT:
+    case Op::HitObjectGetIntersectionTriangleVertexPositionsEXT:
+    case Op::HitObjectGetRayFlagsEXT:
+    case Op::HitObjectSetShaderBindingTableRecordIndexEXT:
+    case Op::HitObjectReorderExecuteShaderEXT:
+    case Op::HitObjectTraceMotionReorderExecuteEXT:
+    case Op::ReorderThreadWithHintEXT:
+    case Op::ReorderThreadWithHitObjectEXT:
+    case Op::HitObjectTraceRayEXT:
+    case Op::HitObjectTraceRayMotionEXT:
+    case Op::HitObjectRecordEmptyEXT:
+    case Op::HitObjectExecuteShaderEXT:
+    case Op::HitObjectGetCurrentTimeEXT:
+    case Op::HitObjectRecordMissEXT:
+    case Op::HitObjectTraceReorderExecuteEXT:
+    case Op::HitObjectGetAttributesEXT:
+    case Op::HitObjectGetPrimitiveIndexEXT:
+    case Op::HitObjectGetGeometryIndexEXT:
+    case Op::HitObjectGetInstanceIdEXT:
+    case Op::HitObjectGetInstanceCustomIndexEXT:
+    case Op::HitObjectGetHitKindEXT:
+    case Op::HitObjectGetObjectRayOriginEXT:
+    case Op::HitObjectGetObjectRayDirectionEXT:
+    case Op::HitObjectGetWorldRayDirectionEXT:
+    case Op::HitObjectGetWorldRayOriginEXT:
+    case Op::HitObjectGetObjectToWorldEXT:
+    case Op::HitObjectGetWorldToObjectEXT:
+    case Op::HitObjectGetRayTMaxEXT:
+    case Op::HitObjectGetRayTMinEXT:
+    case Op::HitObjectGetShaderBindingTableRecordIndexEXT:
+    case Op::HitObjectGetShaderRecordBufferHandleEXT:
+    case Op::HitObjectIsEmptyEXT:
+    case Op::HitObjectIsHitEXT:
+    case Op::HitObjectIsMissEXT:
     {
       RDCERR("Unsupported extension opcode used %s", ToStr(opdata.op).c_str());
 
@@ -5229,12 +5486,15 @@ void ThreadState::StepNext(bool useDebugState, const uint32_t steps,
     case Op::TypeNodePayloadArrayAMDX:
     case Op::ConstantStringAMDX:
     case Op::SpecConstantStringAMDX:
-    case Op::TypeCooperativeVectorNV:
+    case Op::TypeVectorIdEXT:
     case Op::TypeTensorLayoutNV:
     case Op::TypeTensorViewNV:
     case Op::TypeGraphARM:
     case Op::TypeHitObjectNV:
     case Op::TypeCooperativeMatrixKHR:
+    case Op::TypeBufferEXT:
+    case Op::MemberDecorateIdEXT:
+    case Op::TypeHitObjectEXT:
     {
       RDCERR("Encountered unexpected global SPIR-V operation %s", ToStr(opdata.op).c_str());
       break;

@@ -24,6 +24,7 @@
 
 #include "../vk_core.h"
 #include "../vk_debug.h"
+#include "../vk_replay.h"
 #include "core/settings.h"
 
 RDOC_CONFIG(
@@ -307,13 +308,12 @@ void WrappedVulkan::vkDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAl
   // opaque capture address isn't re-used before the capture completes
   {
     SCOPED_READLOCK(m_CapTransitionLock);
-    SCOPED_LOCK(m_DeviceAddressResourcesLock);
-    if(IsActiveCapturing(m_State) && m_DeviceAddressResources.IDs.contains(GetResID(buffer)))
+    if(IsActiveCapturing(m_State) && GetRecord(buffer)->hasBDA)
     {
+      SCOPED_LOCK(m_DeviceAddressResourcesLock);
       m_DeviceAddressResources.DeadBuffers.push_back(buffer);
       return;
     }
-    m_DeviceAddressResources.IDs.removeOne(GetResID(buffer));
   }
 
   if(IsCaptureMode(m_State))
@@ -359,31 +359,61 @@ void WrappedVulkan::vkDestroySwapchainKHR(VkDevice device, VkSwapchainKHR obj,
     GetResourceManager()->ReleaseWrappedResource(info.rp, true);
     ObjDisp(device)->DestroyRenderPass(Unwrap(device), unwrappedRP, NULL);
 
+    bool fakeBackbuffers = info.imageMemory != VK_NULL_HANDLE;
+
+    // If capturing, we defer freeing swapchain fake backbuffer resources until
+    // the end of the capture to prevent potential device address reuse
+    bool deferFakeBackbuffers = false;
+    if(fakeBackbuffers)
+    {
+      SCOPED_READLOCK(m_CapTransitionLock);
+      deferFakeBackbuffers = IsActiveCapturing(m_State);
+      if(deferFakeBackbuffers)
+      {
+        SCOPED_LOCK(m_DeviceAddressResourcesLock);
+        for(size_t i = 0; i < info.images.size(); i++)
+        {
+          SwapchainInfo::SwapImage &img = info.images[i];
+          m_InternalDeviceAddressResources.DeadImages.push_back(img.userSwapImage);
+          m_InternalDeviceAddressResources.DeadImageViews.push_back(img.view);
+        }
+        m_InternalDeviceAddressResources.DeadMemories.push_back(info.imageMemory);
+      }
+    }
+
     for(size_t i = 0; i < info.images.size(); i++)
     {
-      VkFramebuffer unwrappedFB = Unwrap(info.images[i].fb);
-      VkImage unwrappedImage = Unwrap(info.images[i].userSwapImage);
-      VkImageView unwrappedView = Unwrap(info.images[i].view);
-      VkSemaphore unwrappedSem = Unwrap(info.images[i].overlaydone);
-      VkFence unwrappedFence = Unwrap(info.images[i].fence);
-      GetResourceManager()->ReleaseWrappedResource(info.images[i].fb, true);
-      GetResourceManager()->ReleaseWrappedResource(info.images[i].userSwapImage, true);
-      GetResourceManager()->ReleaseWrappedResource(info.images[i].view, true);
-      GetResourceManager()->ReleaseWrappedResource(info.images[i].overlaydone);
-      GetResourceManager()->ReleaseWrappedResource(info.images[i].fence);
-      // if we had a separate real image, then the unwrappedImage is a fake one we  created and must be destroyed
-      if(info.images[i].unwrappedRealSwapImage != VK_NULL_HANDLE)
-        ObjDisp(device)->DestroyImage(Unwrap(device), unwrappedImage, NULL);
+      SwapchainInfo::SwapImage &img = info.images[i];
+      VkFramebuffer unwrappedFB = Unwrap(img.fb);
+      VkSemaphore unwrappedSem = Unwrap(img.overlaydone);
+      VkFence unwrappedFence = Unwrap(img.fence);
+
+      if(!deferFakeBackbuffers)
+      {
+        VkImage unwrappedImage = Unwrap(img.userSwapImage);
+        VkImageView unwrappedView = Unwrap(img.view);
+        GetResourceManager()->ReleaseWrappedResource(img.userSwapImage, true);
+        GetResourceManager()->ReleaseWrappedResource(img.view, true);
+        // if we had a separate real image, then the unwrappedImage is a fake one we created
+        // and must be destroyed
+        if(img.unwrappedRealSwapImage != VK_NULL_HANDLE)
+          ObjDisp(device)->DestroyImage(Unwrap(device), unwrappedImage, NULL);
+        ObjDisp(device)->DestroyImageView(Unwrap(device), unwrappedView, NULL);
+      }
+
+      GetResourceManager()->ReleaseWrappedResource(img.fb, true);
+      GetResourceManager()->ReleaseWrappedResource(img.overlaydone);
+      GetResourceManager()->ReleaseWrappedResource(img.fence);
+
       ObjDisp(device)->DestroyFramebuffer(Unwrap(device), unwrappedFB, NULL);
-      ObjDisp(device)->DestroyImageView(Unwrap(device), unwrappedView, NULL);
       ObjDisp(device)->DestroySemaphore(Unwrap(device), unwrappedSem, NULL);
       ObjDisp(device)->DestroyFence(Unwrap(device), unwrappedFence, NULL);
 
       // return the command buffers to the pool
-      AddFreeCommandBuffer(info.images[i].cmd);
+      AddFreeCommandBuffer(img.cmd);
     }
 
-    if(info.imageMemory != VK_NULL_HANDLE)
+    if(fakeBackbuffers && !deferFakeBackbuffers)
     {
       ObjDisp(device)->FreeMemory(Unwrap(device), Unwrap(info.imageMemory), NULL);
       GetResourceManager()->ReleaseWrappedResource(info.imageMemory, true);
@@ -2663,6 +2693,259 @@ static ObjData GetObjData(VkDebugReportObjectTypeEXT objType, uint64_t object)
   return GetObjData(castType, object);
 }
 
+ResourceId WrappedVulkan::GetIDForUserObject(void *object)
+{
+  VkResourceType type = TryIdentifyTypeByPtr((WrappedVkRes *)object);
+
+  if(IsDispatchableRes(type))
+  {
+    WrappedVkDispRes *disp = (WrappedVkDispRes *)object;
+
+    return disp->id;
+  }
+  else if(type != eResUnknown)
+  {
+    WrappedVkNonDispRes *nondisp = (WrappedVkNonDispRes *)object;
+
+    return nondisp->id;
+  }
+  else
+  {
+    // the object was wrapped between us and the application. We'll assume it's pointer-ish and look
+    // at its dispatch table. If this crashes, not much we can do
+    void *dispatchTable = RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(object);
+
+    if(dispatchTable == RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(m_Instance))
+    {
+      // instance or physical device - they share a dispatch table
+
+      if(m_UserInstance == object)
+      {
+        return GetResID(m_Instance);
+      }
+      else
+      {
+        VkPhysicalDevice physDev = m_UserPhysicalDevices[object];
+
+        if(physDev != VK_NULL_HANDLE)
+        {
+          return GetResID(physDev);
+        }
+        else
+        {
+          // unknown object, default to the instance
+          return GetResID(m_Instance);
+        }
+      }
+    }
+    else if(dispatchTable == RENDERDOC_DEVICEPOINTER_FROM_VKINSTANCE(m_Device))
+    {
+      // device, queue, or command buffer - they would share a dispatch table
+
+      if(m_UserDevice == object)
+      {
+        return GetResID(m_Device);
+      }
+      else
+      {
+        VkQueue queue = m_UserQueues[object];
+
+        if(queue != VK_NULL_HANDLE)
+        {
+          return GetResID(queue);
+        }
+        else
+        {
+          // unknown object, default to the device
+          return GetResID(m_Device);
+        }
+      }
+    }
+  }
+
+  return ResourceId();
+}
+
+uint32_t WrappedVulkan::SetObjectAnnotation(void *object, const char *key,
+                                            RENDERDOC_AnnotationType valueType,
+                                            uint32_t valueVectorWidth,
+                                            const RENDERDOC_AnnotationValue *value)
+{
+  ResourceId id = GetIDForUserObject(object);
+
+  if(id != ResourceId())
+  {
+    RENDERDOC_AnnotationValue val = value ? *value : RENDERDOC_AnnotationValue();
+
+    if(valueType == eRENDERDOC_APIObject)
+    {
+      ResourceId valId = GetIDForUserObject(val.apiObject);
+      RDCCOMPILE_ASSERT(sizeof(val.uint64) == sizeof(valId), "ResourceId isn't 64-bit!");
+      memcpy(&val.uint64, &valId, sizeof(valId));
+    }
+
+    SDObject *root = NULL;
+    {
+      SCOPED_LOCK(m_AnnotationsLock);
+      root = m_Annotations[id];
+      if(!root)
+        root = m_Annotations[id] = new SDObject("Object Annotations"_lit, "Object Annotations"_lit);
+    }
+
+    if(valueType == eRENDERDOC_Empty)
+    {
+      root->EraseChildByKeyPath(key);
+    }
+    else
+    {
+      WriteAnnotation(root->CreateChildByKeyPath(key), valueType, valueVectorWidth, val);
+    }
+
+    return 0;
+  }
+
+  return 2;
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_SetQueueAnnotation(SerialiserType &ser, VkQueue queue, rdcstr key,
+                                                 RENDERDOC_AnnotationType valueType,
+                                                 uint32_t valueVectorWidth,
+                                                 RENDERDOC_AnnotationValue value)
+{
+  SERIALISE_ELEMENT(queue);
+  SERIALISE_ELEMENT(key);
+  SERIALISE_ELEMENT(valueType);
+  ser.SetStructArg(valueType);
+  SERIALISE_ELEMENT(valueVectorWidth);
+  SERIALISE_ELEMENT(value);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+    {
+      if(!m_RootAnnotation)
+        m_RootAnnotation = new SDObject("Event Annotations"_lit, "Event Annotations"_lit);
+
+      SDObject *root = m_RootAnnotation;
+
+      if(valueType == eRENDERDOC_Empty)
+      {
+        root->EraseChildByKeyPath(key);
+      }
+      else
+      {
+        WriteAnnotation(root->CreateChildByKeyPath(key), valueType, valueVectorWidth, value);
+      }
+
+      m_Replay->WriteFrameRecord().frameInfo.containsAnnotations = true;
+    }
+  }
+
+  return true;
+}
+
+template <typename SerialiserType>
+bool WrappedVulkan::Serialise_SetCommandAnnotation(SerialiserType &ser, VkCommandBuffer cmd,
+                                                   rdcstr key, RENDERDOC_AnnotationType valueType,
+                                                   uint32_t valueVectorWidth,
+                                                   RENDERDOC_AnnotationValue value)
+{
+  SERIALISE_ELEMENT(cmd);
+  SERIALISE_ELEMENT(key);
+  SERIALISE_ELEMENT(valueType);
+  ser.SetStructArg(valueType);
+  SERIALISE_ELEMENT(valueVectorWidth);
+  SERIALISE_ELEMENT(value);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+    {
+      if(!m_RootAnnotation)
+        m_RootAnnotation = new SDObject("Event Annotations"_lit, "Event Annotations"_lit);
+
+      ResourceId cmdId = GetResID(cmd);
+
+      PendingAnnotation annot = {m_BakedCmdBufferInfo[cmdId].curEventID, key, valueType,
+                                 valueVectorWidth, value};
+
+      m_BakedCmdBufferInfo[cmdId].annotations.push_back(annot);
+
+      m_Replay->WriteFrameRecord().frameInfo.containsAnnotations = true;
+    }
+  }
+
+  return true;
+}
+
+uint32_t WrappedVulkan::SetCommandAnnotation(void *queueOrCommandBuffer, const char *key,
+                                             RENDERDOC_AnnotationType valueType,
+                                             uint32_t valueVectorWidth,
+                                             const RENDERDOC_AnnotationValue *value)
+{
+  if(WrappedVkQueue::IsAlloc(queueOrCommandBuffer))
+  {
+    VkQueue queue = (VkQueue)(WrappedVkQueue *)queueOrCommandBuffer;
+
+    if(IsActiveCapturing(m_State))
+    {
+      CACHE_THREAD_SERIALISER();
+      ser.SetActionChunk();
+      SCOPED_SERIALISE_CHUNK(VulkanChunk::SetQueueAnnotation);
+
+      RENDERDOC_AnnotationValue val = value ? *value : RENDERDOC_AnnotationValue();
+
+      if(valueType == eRENDERDOC_APIObject)
+      {
+        ResourceId id = GetIDForUserObject(val.apiObject);
+        RDCCOMPILE_ASSERT(sizeof(val.uint64) == sizeof(id), "ResourceId isn't 64-bit!");
+        memcpy(&val.uint64, &id, sizeof(id));
+      }
+
+      Serialise_SetQueueAnnotation(ser, queue, key, valueType, valueVectorWidth, val);
+
+      m_FrameCaptureRecord->AddChunk(scope.Get());
+      GetResourceManager()->MarkResourceFrameReferenced(GetResID(queue), eFrameRef_Read);
+    }
+
+    return 0;
+  }
+  else if(WrappedVkCommandBuffer::IsAlloc(queueOrCommandBuffer))
+  {
+    VkCommandBuffer cmd = (VkCommandBuffer)(WrappedVkCommandBuffer *)queueOrCommandBuffer;
+
+    if(IsCaptureMode(m_State))
+    {
+      CACHE_THREAD_SERIALISER();
+      ser.SetActionChunk();
+      SCOPED_SERIALISE_CHUNK(VulkanChunk::SetCommandAnnotation);
+
+      RENDERDOC_AnnotationValue val = value ? *value : RENDERDOC_AnnotationValue();
+
+      if(valueType == eRENDERDOC_APIObject)
+      {
+        ResourceId id = GetIDForUserObject(val.apiObject);
+        RDCCOMPILE_ASSERT(sizeof(val.uint64) == sizeof(id), "ResourceId isn't 64-bit!");
+        memcpy(&val.uint64, &id, sizeof(id));
+      }
+
+      Serialise_SetCommandAnnotation(ser, cmd, key, valueType, valueVectorWidth, val);
+
+      GetRecord(cmd)->AddChunk(scope.Get());
+      GetResourceManager()->MarkResourceFrameReferenced(GetResID(cmd), eFrameRef_Read);
+    }
+
+    return 0;
+  }
+
+  return 2;
+}
+
 template <typename SerialiserType>
 bool WrappedVulkan::Serialise_SetShaderDebugPath(SerialiserType &ser, VkShaderModule ShaderObject,
                                                  rdcstr DebugPath)
@@ -2959,6 +3242,17 @@ VkResult WrappedVulkan::vkSetDebugUtilsObjectTagEXT(VkDevice device,
     {
       m_InitParams.DescriptorsReserved = true;
     }
+    else if(data.record && pTagInfo->tagName == RENDERDOC_APIObjectAnnotationHelper)
+    {
+      if(pTagInfo->objectType == VK_OBJECT_TYPE_INSTANCE)
+        m_UserInstance = pTagInfo->pTag;
+      else if(pTagInfo->objectType == VK_OBJECT_TYPE_PHYSICAL_DEVICE)
+        m_UserPhysicalDevices[pTagInfo->pTag] = (VkPhysicalDevice)pTagInfo->objectHandle;
+      else if(pTagInfo->objectType == VK_OBJECT_TYPE_DEVICE)
+        m_UserDevice = pTagInfo->pTag;
+      else if(pTagInfo->objectType == VK_OBJECT_TYPE_QUEUE)
+        m_UserQueues[pTagInfo->pTag] = (VkQueue)pTagInfo->objectHandle;
+    }
     else if(ObjDisp(device)->SetDebugUtilsObjectTagEXT)
     {
       VkDebugUtilsObjectTagInfoEXT unwrapped = *pTagInfo;
@@ -3114,3 +3408,11 @@ INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkCopyMemoryToImage, VkDevice device,
 
 INSTANTIATE_FUNCTION_SERIALISED(VkResult, vkResetQueryPool, VkDevice device, VkQueryPool queryPool,
                                 uint32_t firstQuery, uint32_t queryCount);
+
+INSTANTIATE_FUNCTION_SERIALISED(void, SetCommandAnnotation, VkCommandBuffer cmd, rdcstr key,
+                                RENDERDOC_AnnotationType valueType, uint32_t valueVectorWidth,
+                                RENDERDOC_AnnotationValue value);
+
+INSTANTIATE_FUNCTION_SERIALISED(void, SetQueueAnnotation, VkQueue queue, rdcstr key,
+                                RENDERDOC_AnnotationType valueType, uint32_t valueVectorWidth,
+                                RENDERDOC_AnnotationValue value);

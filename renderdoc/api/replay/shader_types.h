@@ -676,6 +676,13 @@ struct SourceVariableMapping
 )");
   VarType type = VarType::Unknown;
 
+  DOCUMENT(R"(A flag indicating if this mapping indicates an undefined value - the meaning of which
+is compiler defined but may mean either uninitialised data, unassigned values, or optimised away values.
+
+:type: bool
+)");
+  bool undefinedValue = false;
+
   DOCUMENT(R"(The number of rows in this variable - 1 for vectors, >1 for matrices.
 
 :type: int
@@ -1969,6 +1976,12 @@ shader is not supported for debugging
 :type: str
 )");
   rdcstr debugStatus;
+
+  DOCUMENT(R"(Contains a log of the debug shader loading process i.e. searching for shader PDB.
+
+:type: str
+)");
+  rdcstr debugInfoLoadingLog;
 };
 
 DECLARE_REFLECTION_STRUCT(ShaderDebugInfo);

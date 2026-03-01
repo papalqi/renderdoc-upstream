@@ -445,7 +445,7 @@ const ShaderReflection *VulkanReplay::GetShader(ResourceId pipeline, ResourceId 
   // if this shader was never used in a pipeline the reflection won't be prepared. Do that now -
   // this will be ignored if it was already prepared.
   shad->second.GetReflection(entry.stage, entry.name, pipeline)
-      .Init(GetResourceManager(), shader, shad->second.spirv, entry.name,
+      .Init(GetResourceManager(), m_pDriver->m_CreationInfo, shader, shad->second.spirv, entry.name,
             VkShaderStageFlagBits(1 << uint32_t(entry.stage)), {});
 
   return shad->second.GetReflection(entry.stage, entry.name, pipeline).refl;
@@ -1059,7 +1059,7 @@ void VulkanReplay::GetBufferData(ResourceId buff, uint64_t offset, uint64_t len,
   }
 
   // push constants 'descriptor' stored in a command buffer
-  if(WrappedVkCommandBuffer::IsAlloc(GetResourceManager()->GetResource(buff)))
+  if(m_pDriver->m_BakedCmdBufferInfo.find(buff) != m_pDriver->m_BakedCmdBufferInfo.end())
   {
     inlineData.assign(m_pDriver->m_RenderState.pushconsts, m_pDriver->m_RenderState.pushConstSize);
     useInlineData = true;
@@ -2582,7 +2582,7 @@ rdcarray<Descriptor> VulkanReplay::GetDescriptors(ResourceId descriptorStore,
   }
 
   // push constants 'descriptor' stored in a command buffer
-  if(WrappedVkCommandBuffer::IsAlloc(rm->GetResource(descriptorStore)))
+  if(m_pDriver->m_BakedCmdBufferInfo.find(descriptorStore) != m_pDriver->m_BakedCmdBufferInfo.end())
   {
     const VulkanRenderState &state = m_pDriver->m_RenderState;
 
@@ -2738,7 +2738,7 @@ rdcarray<SamplerDescriptor> VulkanReplay::GetSamplerDescriptors(ResourceId descr
   }
 
   // push constants 'descriptor' stored in a command buffer
-  if(WrappedVkCommandBuffer::IsAlloc(GetResourceManager()->GetResource(descriptorStore)))
+  if(m_pDriver->m_BakedCmdBufferInfo.find(descriptorStore) != m_pDriver->m_BakedCmdBufferInfo.end())
   {
     // not sampler data
     return ret;
@@ -3012,10 +3012,8 @@ rdcarray<DescriptorLogicalLocation> VulkanReplay::GetDescriptorLocations(
     return ret;
   }
 
-  VulkanResourceManager *rm = m_pDriver->GetResourceManager();
-
   // push constants 'descriptor' stored in a command buffer
-  if(WrappedVkCommandBuffer::IsAlloc(rm->GetResource(descriptorStore)))
+  if(m_pDriver->m_BakedCmdBufferInfo.find(descriptorStore) != m_pDriver->m_BakedCmdBufferInfo.end())
   {
     // should only be one descriptor referred here, but just munge them all to be the same
     for(DescriptorLogicalLocation &d : ret)
@@ -5205,6 +5203,12 @@ void VulkanReplay::ClearReplayCache()
   ClearFeedbackCache();
 }
 
+void VulkanReplay::ReloadShaderDebugInformation()
+{
+  m_pDriver->ReloadShaderDebugInformation();
+  ClearReplayCache();
+}
+
 void VulkanReplay::ReplaceResource(ResourceId from, ResourceId to)
 {
   // remove existing shader replacement
@@ -5271,7 +5275,7 @@ void VulkanReplay::RefreshDerivedReplacements()
     ResourceId origsrcid = pipesrcid;
 
     // only look at pipelines from the capture, no replay-time programs.
-    if(origsrcid == pipesrcid)
+    if(ResourceIDGen::IsReplayOnlyID(pipesrcid))
       continue;
 
     // if this pipeline has a replacement, remove it and delete the program generated for it
@@ -5312,7 +5316,7 @@ void VulkanReplay::RefreshDerivedReplacements()
           VkPipelineShaderStageCreateInfo &sh =
               (VkPipelineShaderStageCreateInfo &)pipeCreateInfo.pStages[i];
 
-          ResourceId shadId = GetResID(sh.module);
+          ResourceId shadId = rm->GetUnreplacedID(GetResID(sh.module));
 
           sh.module = rm->GetHandle<VkShaderModule>(shadId);
 

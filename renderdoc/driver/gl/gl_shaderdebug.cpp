@@ -238,6 +238,10 @@ public:
     {
       GL.glGetUniformiv(prog, location, var.value.s32v.data());
     }
+    else if(var.type == VarType::Bool)
+    {
+      GL.glGetUniformuiv(prog, location, var.value.u32v.data());
+    }
     else
     {
       RDCERR("Unexpected type of variable");
@@ -2215,6 +2219,12 @@ void SetInputs(out Inputs inputs) {}
             source += StringFormat::Fmt("layout(location = %u) ", sig.regIndex);
           if(sig.varType != VarType::Float && shadDetails.type == eGL_FRAGMENT_SHADER)
             source += "flat ";
+          else if(shadDetails.type == eGL_FRAGMENT_SHADER)
+          {
+            SPIRVInterpolationMode interpMode = patchData.inputs[i].interpMode;
+            if(interpMode != SPIRVInterpolationMode::Smooth)
+              source += ToStr(interpMode) + " ";
+          }
           source += StringFormat::Fmt("in %s\n", sigDecl.c_str());
         }
       }
@@ -2429,7 +2439,7 @@ layout(std140) buffer Output
 #define ddy_fine dFdyFine
 #else
 #define ddx_fine dFdx
-#define ddy_fine dFdx
+#define ddy_fine dFdy
 #endif
 
 #define float4 vec4

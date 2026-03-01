@@ -30,16 +30,10 @@ RDOC_CONFIG(bool, Vulkan_Debug_MemoryAllocationLogging, false,
 
 GPUAddressRange WrappedVulkan::CreateAddressRange(VkDevice device, VkBuffer buffer)
 {
-  bool isBDA = false;
-  {
-    SCOPED_LOCK(m_DeviceAddressResourcesLock);
-    isBDA = m_DeviceAddressResources.IDs.contains(GetResID(buffer));
-  }
-
-  if(!isBDA)
+  VkResourceRecord *record = GetRecord(buffer);
+  if(!record->hasBDA)
     return {};
 
-  VkResourceRecord *record = GetRecord(buffer);
   VkResourceRecord *memrecord = GetResourceManager()->GetResourceRecord(record->baseResourceMem);
 
   const bool isSparse = record->resInfo && record->resInfo->IsSparse();
@@ -564,12 +558,19 @@ void WrappedVulkan::FreeAllMemory(MemoryScope scope)
   rdcarray<MemoryAllocation> allocs;
   allocs.swap(allocList);
 
-  m_MemoryFreeThread = Threading::CreateThread([this, d, allocs]() {
-    for(const MemoryAllocation &alloc : allocs)
-    {
-      ObjDisp(d)->FreeMemory(Unwrap(d), Unwrap(alloc.mem), NULL);
-      GetResourceManager()->ReleaseWrappedResource(alloc.mem);
-    }
+  rdcarray<VkDeviceMemory> mems;
+  mems.reserve(allocs.size());
+
+  // clean up resource manager book-keeping as this is not thread safe and is fast anyway
+  for(const MemoryAllocation &alloc : allocs)
+  {
+    mems.push_back(Unwrap(alloc.mem));
+    GetResourceManager()->ReleaseWrappedResource(alloc.mem);
+  }
+
+  m_MemoryFreeThread = Threading::CreateThread([d, mems]() {
+    for(VkDeviceMemory mem : mems)
+      ObjDisp(d)->FreeMemory(Unwrap(d), mem, NULL);
   });
 }
 

@@ -25,6 +25,7 @@
 #include "d3d12_command_queue.h"
 #include "core/settings.h"
 #include "d3d12_command_list.h"
+#include "d3d12_replay.h"
 #include "d3d12_resources.h"
 
 RDOC_EXTERN_CONFIG(bool, D3D12_Debug_SingleSubmitFlushing);
@@ -628,7 +629,7 @@ bool WrappedID3D12CommandQueue::Serialise_ExecuteCommandLists(SerialiserType &se
 
         // insert the baked command list in-line into this list of notes, assigning new event and
         // drawIDs
-        m_Cmd.InsertActionsAndRefreshIDs(cmd, cmdListInfo.action->children);
+        m_Cmd.InsertActionsAndRefreshIDs(cmd, cmdListInfo);
 
         for(size_t e = 0; e < cmdListInfo.action->executedCmds.size(); e++)
         {
@@ -795,18 +796,18 @@ bool WrappedID3D12CommandQueue::Serialise_ExecuteCommandLists(SerialiserType &se
   return true;
 }
 
-ID3D12Fence *WrappedID3D12CommandQueue::GetRayFence()
+ID3D12Fence *WrappedID3D12CommandQueue::GetCallbackFence()
 {
   // if we don't have a fence for this queue tracking, create it now
-  if(!m_RayFence)
+  if(!m_CallbackFence)
   {
     // create this unwrapped so that it doesn't get recorded into captures
     m_pDevice->GetReal()->CreateFence(0, D3D12_FENCE_FLAG_NONE, __uuidof(ID3D12Fence),
-                                      (void **)&m_RayFence);
-    m_RayFence->SetName(L"Queue Ray Fence");
+                                      (void **)&m_CallbackFence);
+    m_CallbackFence->SetName(L"Queue Callback Fence");
   }
 
-  return m_RayFence;
+  return m_CallbackFence;
 }
 
 void WrappedID3D12CommandQueue::ExecuteCommandLists(UINT NumCommandLists,
@@ -839,7 +840,7 @@ void WrappedID3D12CommandQueue::ExecuteCommandListsInternal(UINT NumCommandLists
   {
     SERIALISE_TIME_CALL(m_pReal->ExecuteCommandLists(NumCommandLists, unwrapped));
 
-    rdcarray<std::function<bool()>> pendingASBuildCallbacks;
+    rdcarray<std::function<bool()>> pendingCallbacks;
 
     for(UINT i = 0; i < NumCommandLists; i++)
     {
@@ -851,24 +852,24 @@ void WrappedID3D12CommandQueue::ExecuteCommandListsInternal(UINT NumCommandLists
         RDCLOG("Submit-callbacks for %s", ToStr(wrapped->GetResourceID()).c_str());
       }
 
-      if(!wrapped->ExecuteImmediateASBuildCallbacks())
+      if(!wrapped->ExecuteImmediateCallbacks())
       {
-        RDCERR("Unable to execute post build for acc struct");
+        RDCERR("Unable to execute list submission callback");
       }
 
-      wrapped->TakeWaitingASBuildCallbacks(pendingASBuildCallbacks);
+      wrapped->TakeWaitingCallbacks(pendingCallbacks);
     }
 
-    if(!pendingASBuildCallbacks.empty())
+    if(!pendingCallbacks.empty())
     {
-      ID3D12Fence *fence = GetRayFence();
+      ID3D12Fence *fence = GetCallbackFence();
 
       // these callbacks need to be synchronised at every submission to process them as soon as the
       // results are available, since we could submit a build on one queue and then a dependent
       // build on another queue later once it's finished without any intermediate submissions on the
       // first queue. For that reason we pass these to the RT handler to hold onto, and tick it
-      GetResourceManager()->GetRTManager()->AddPendingASBuilds(fence, m_RayFenceValue,
-                                                               pendingASBuildCallbacks);
+      GetResourceManager()->GetRTManager()->AddPendingCallbacks(fence, m_RayFenceValue,
+                                                                pendingCallbacks);
 
       // add the signal for those callbacks to wait on
       HRESULT hr = m_pReal->Signal(fence, m_RayFenceValue++);
@@ -1029,7 +1030,7 @@ void WrappedID3D12CommandQueue::ExecuteCommandListsInternal(UINT NumCommandLists
 
       m_RayDispatchesPending.append(rayDispatches);
 
-      HRESULT hr = m_pReal->Signal(GetRayFence(), m_RayFenceValue++);
+      HRESULT hr = m_pReal->Signal(GetCallbackFence(), m_RayFenceValue++);
       CHECK_HR(m_pDevice, hr);
       RDCASSERTEQUAL(hr, S_OK);
     }
@@ -1552,6 +1553,47 @@ HRESULT STDMETHODCALLTYPE WrappedID3D12CommandQueue::Present(
   return m_pDownlevel->Present(Unwrap(pOpenCommandList), Unwrap(pSourceTex2D), hWindow, Flags);
 }
 
+template <typename SerialiserType>
+bool WrappedID3D12CommandQueue::Serialise_SetQueueAnnotation(SerialiserType &ser, rdcstr key,
+                                                             RENDERDOC_AnnotationType valueType,
+                                                             uint32_t valueVectorWidth,
+                                                             RENDERDOC_AnnotationValue value)
+{
+  ID3D12CommandQueue *pQueue = this;
+  SERIALISE_ELEMENT(pQueue);
+  SERIALISE_ELEMENT(key);
+  SERIALISE_ELEMENT(valueType);
+  ser.SetStructArg(valueType);
+  SERIALISE_ELEMENT(valueVectorWidth);
+  SERIALISE_ELEMENT(value);
+
+  SERIALISE_CHECK_READ_ERRORS();
+
+  if(IsReplayingAndReading())
+  {
+    if(IsLoading(m_State))
+    {
+      if(!m_Cmd.m_RootAnnotation)
+        m_Cmd.m_RootAnnotation = new SDObject("Event Annotations"_lit, "Event Annotations"_lit);
+
+      SDObject *root = m_Cmd.m_RootAnnotation;
+
+      if(valueType == eRENDERDOC_Empty)
+      {
+        root->EraseChildByKeyPath(key);
+      }
+      else
+      {
+        WriteAnnotation(root->CreateChildByKeyPath(key), valueType, valueVectorWidth, value);
+      }
+
+      m_pDevice->GetReplay()->WriteFrameRecord().frameInfo.containsAnnotations = true;
+    }
+  }
+
+  return true;
+}
+
 INSTANTIATE_FUNCTION_SERIALISED(
     void, WrappedID3D12CommandQueue, UpdateTileMappings, ID3D12Resource *pResource,
     UINT NumResourceRegions, const D3D12_TILED_RESOURCE_COORDINATE *pResourceRegionStartCoordinates,
@@ -1578,3 +1620,7 @@ INSTANTIATE_FUNCTION_SERIALISED(void, WrappedID3D12CommandQueue, Signal, ID3D12F
                                 UINT64 Value);
 INSTANTIATE_FUNCTION_SERIALISED(void, WrappedID3D12CommandQueue, Wait, ID3D12Fence *pFence,
                                 UINT64 Value);
+
+INSTANTIATE_FUNCTION_SERIALISED(void, WrappedID3D12CommandQueue, SetQueueAnnotation, rdcstr key,
+                                RENDERDOC_AnnotationType valueType, uint32_t valueVectorWidth,
+                                RENDERDOC_AnnotationValue value);

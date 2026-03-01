@@ -27,6 +27,7 @@
 #include "driver/dxgi/dxgi_common.h"
 #include "driver/ihv/amd/official/DXExt/AmdExtD3D.h"
 #include "driver/ihv/amd/official/DXExt/AmdExtD3DCommandListMarkerApi.h"
+#include "driver/ihv/nv/nv_aftermath.h"
 #include "d3d12_command_list.h"
 #include "d3d12_command_queue.h"
 #include "d3d12_replay.h"
@@ -103,8 +104,14 @@ bool WrappedID3D12Device::Serialise_CreateCommandQueue(SerialiserType &ser,
 
   if(IsReplayingAndReading())
   {
+    void *realptr = NULL;
+    HRESULT hr = m_pDevice->CreateCommandQueue(&Descriptor, guid, &realptr);
+
     ID3D12CommandQueue *ret = NULL;
-    HRESULT hr = m_pDevice->CreateCommandQueue(&Descriptor, guid, (void **)&ret);
+    if(guid == __uuidof(ID3D12CommandQueue))
+      ret = (ID3D12CommandQueue *)realptr;
+    else if(guid == __uuidof(ID3D12CommandQueue1))
+      ret = (ID3D12CommandQueue1 *)realptr;
 
     if(FAILED(hr))
     {
@@ -152,12 +159,17 @@ HRESULT WrappedID3D12Device::CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC *
   if(ppCommandQueue == NULL)
     return m_pDevice->CreateCommandQueue(pDesc, riid, NULL);
 
-  if(riid != __uuidof(ID3D12CommandQueue))
+  if(riid != __uuidof(ID3D12CommandQueue) && riid != __uuidof(ID3D12CommandQueue1))
     return E_NOINTERFACE;
 
+  void *realptr = NULL;
+  HRESULT ret = m_pDevice->CreateCommandQueue(pDesc, riid, &realptr);
+
   ID3D12CommandQueue *real = NULL;
-  HRESULT ret;
-  SERIALISE_TIME_CALL(ret = m_pDevice->CreateCommandQueue(pDesc, riid, (void **)&real));
+  if(riid == __uuidof(ID3D12CommandQueue))
+    real = (ID3D12CommandQueue *)realptr;
+  else if(riid == __uuidof(ID3D12CommandQueue1))
+    real = (ID3D12CommandQueue1 *)realptr;
 
   if(SUCCEEDED(ret))
   {
@@ -205,7 +217,10 @@ HRESULT WrappedID3D12Device::CreateCommandQueue(const D3D12_COMMAND_QUEUE_DESC *
           wrapped->GetCreationRecord()->GetResourceID(), eFrameRef_Read);
     }
 
-    *ppCommandQueue = (ID3D12CommandQueue *)wrapped;
+    if(riid == __uuidof(ID3D12CommandQueue))
+      *ppCommandQueue = (ID3D12CommandQueue *)wrapped;
+    else if(riid == __uuidof(ID3D12CommandQueue1))
+      *ppCommandQueue = (ID3D12CommandQueue1 *)wrapped;
   }
   else
   {
@@ -582,6 +597,9 @@ bool WrappedID3D12Device::Serialise_CreateGraphicsPipelineState(
             WrappedID3D12Shader::AddShader(InlineShaderIDs[i], *shaders[i], this);
         entry->AddRef();
 
+        NVAftermath_Shader(ShaderEncoding::DXBC, shaders[i]->pShaderBytecode,
+                           shaders[i]->BytecodeLength);
+
         shaders[i]->pShaderBytecode = entry;
 
         if(m_GlobalEXTUAV != ~0U)
@@ -879,6 +897,9 @@ bool WrappedID3D12Device::Serialise_CreateComputePipelineState(
     WrappedID3D12Shader *entry =
         WrappedID3D12Shader::AddShader(InlineShaderID, wrapped->compute->CS, this);
     entry->AddRef();
+
+    NVAftermath_Shader(ShaderEncoding::DXBC, wrapped->compute->CS.pShaderBytecode,
+                       wrapped->compute->CS.BytecodeLength);
 
     if(m_GlobalEXTUAV != ~0U)
       entry->SetShaderExtSlot(m_GlobalEXTUAV, m_GlobalEXTUAVSpace);
@@ -1826,7 +1847,7 @@ bool WrappedID3D12Device::Serialise_CreateQueryHeap(SerialiserType &ser,
     }
     else
     {
-      ret = new WrappedID3D12QueryHeap(pQueryHeap, ret, this);
+      ret = new WrappedID3D12QueryHeap(pQueryHeap, ret, Descriptor, this);
     }
 
     AddResource(pQueryHeap, ResourceType::Query, "Query Heap");
@@ -1850,7 +1871,7 @@ HRESULT WrappedID3D12Device::CreateQueryHeap(const D3D12_QUERY_HEAP_DESC *pDesc,
 
   if(SUCCEEDED(ret))
   {
-    WrappedID3D12QueryHeap *wrapped = new WrappedID3D12QueryHeap(ResourceId(), real, this);
+    WrappedID3D12QueryHeap *wrapped = new WrappedID3D12QueryHeap(ResourceId(), real, *pDesc, this);
 
     if(IsCaptureMode(m_State))
     {
@@ -1865,6 +1886,8 @@ HRESULT WrappedID3D12Device::CreateQueryHeap(const D3D12_QUERY_HEAP_DESC *pDesc,
       wrapped->SetResourceRecord(record);
 
       record->AddChunk(scope.Get());
+
+      GetResourceManager()->MarkDirtyResource(wrapped->GetResourceID());
     }
 
     *ppvHeap = (ID3D12QueryHeap *)wrapped;

@@ -173,11 +173,11 @@ class WrappedID3D12CommandQueue : public ID3D12CommandQueue1,
   CaptureState &m_State;
 
   // tracking ray dispatches that are pending during capture, to free them once the execution is finished
-  ID3D12Fence *m_RayFence = NULL;
+  ID3D12Fence *m_CallbackFence = NULL;
   UINT64 m_RayFenceValue = 1;
   rdcarray<PatchedRayDispatch::Resources> m_RayDispatchesPending;
 
-  ID3D12Fence *GetRayFence();
+  ID3D12Fence *GetCallbackFence();
 
   bool m_MarkedActive = false;
 
@@ -237,6 +237,11 @@ public:
 
   void CheckAndFreeRayDispatches();
 
+  template <typename SerialiserType>
+  bool Serialise_SetQueueAnnotation(SerialiserType &ser, rdcstr key,
+                                    RENDERDOC_AnnotationType valueType, uint32_t valueVectorWidth,
+                                    RENDERDOC_AnnotationValue value);
+
   RDResult ReplayLog(CaptureState readType, uint32_t startEventID, uint32_t endEventID, bool partial);
   void SetFrameReader(StreamReader *reader) { m_FrameReader = reader; }
   D3D12CommandData *GetCommandData() { return &m_Cmd; }
@@ -246,16 +251,19 @@ public:
   virtual IID GetBackbufferUUID() { return __uuidof(ID3D12Resource); }
   virtual bool IsDeviceUUID(REFIID iid)
   {
-    return iid == __uuidof(ID3D12CommandQueue) ? true : false;
+    if(iid == __uuidof(ID3D12CommandQueue) || iid == __uuidof(ID3D12CommandQueue1))
+      return true;
+
+    return m_pDevice->IsDeviceUUID(iid);
   }
   virtual IUnknown *GetDeviceInterface(REFIID iid)
   {
     if(iid == __uuidof(ID3D12CommandQueue))
       return (ID3D12CommandQueue *)this;
+    if(iid == __uuidof(ID3D12CommandQueue1))
+      return (ID3D12CommandQueue1 *)this;
 
-    RDCERR("Requested unknown device interface %s", ToStr(iid).c_str());
-
-    return NULL;
+    return m_pDevice->GetDeviceInterface(iid);
   }
   // the rest forward to the device
   virtual void *GetFrameCapturerDevice() { return m_pDevice->GetFrameCapturerDevice(); }

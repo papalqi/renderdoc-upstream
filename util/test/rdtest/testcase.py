@@ -1007,6 +1007,16 @@ class TestCase:
         for var in payload.variables:
             var_data = {}
             var_data[var.name] = []
+            if (var.type.baseType == rd.VarType.Struct):
+                structSize = 0
+                structSize += var.type.members[0].byteOffset
+                for member in var.type.members:
+                    byteWidth = rd.VarTypeByteSize(member.type.baseType)
+                    structSize += byteWidth * member.type.columns * member.type.elements
+                skipBytes = structSize * var.type.elements
+                log.print(f"Skipping struct variable '{var.name}' Size {skipBytes}")
+                offset += skipBytes
+                continue
             # This is not complete to decode all possible payload layouts
             for i in range(var.type.elements):
                 format = rd.ResourceFormat()
@@ -1016,7 +1026,8 @@ class TestCase:
                 format.type = rd.ResourceFormatType.Regular
 
                 data =  analyse.unpack_data(format, buffer_data, offset)
-                var_data[var.name] += data
+                if data:
+                    var_data[var.name] += data
                 offset += format.compByteWidth * format.compCount
             ret.append(var_data)
 

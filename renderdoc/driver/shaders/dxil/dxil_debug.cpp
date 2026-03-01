@@ -8108,12 +8108,12 @@ const TypeData &Debugger::AddDebugType(const DXIL::Metadata *typeMD)
     case DXIL::DIBase::Type::CompositeType:
     {
       const DICompositeType *compositeType = base->As<DICompositeType>();
-      typeData.baseType = typeMD;
       switch(compositeType->tag)
       {
         case DW_TAG_class_type:
         case DW_TAG_structure_type:
         {
+          typeData.baseType = typeMD;
           typeData.sizeInBytes = (uint32_t)(compositeType->sizeInBits / 8);
           typeData.alignInBytes = (uint32_t)(compositeType->alignInBits / 8);
 
@@ -8212,6 +8212,27 @@ const TypeData &Debugger::AddDebugType(const DXIL::Metadata *typeMD)
           }
           AddDebugType(compositeType->base);
           typeData.baseType = compositeType->base;
+          break;
+        }
+        case DW_TAG_enumeration_type:
+        {
+          typeData.type = VarType::Enum;
+          typeData.sizeInBytes = (uint32_t)(compositeType->sizeInBits / 8);
+          typeData.alignInBytes = (uint32_t)(compositeType->alignInBits / 8);
+          if(compositeType->name)
+            typeData.name = *compositeType->name;
+          else
+            typeData.name = StringFormat::Fmt("__anon_enum%u", compositeType->line);
+
+          if(compositeType->base)
+          {
+            AddDebugType(compositeType->base);
+            typeData.baseType = compositeType->base;
+          }
+          else
+          {
+            typeData.baseType = typeMD;
+          }
           break;
         }
         default:

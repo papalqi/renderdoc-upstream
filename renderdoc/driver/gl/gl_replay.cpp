@@ -768,7 +768,7 @@ rdcarray<DebugMessage> GLReplay::GetDebugMessages()
 
 rdcarray<ShaderEntryPoint> GLReplay::GetShaderEntryPoints(ResourceId shader)
 {
-  if(m_pDriver->HasShader(shader))
+  if(!m_pDriver->HasShader(shader))
     return {};
 
   const WrappedOpenGL::ShaderData &shaderDetails = m_pDriver->GetShader(shader);
@@ -3745,6 +3745,11 @@ void GLReplay::FreeTargetResource(ResourceId id)
 void GLReplay::ClearReplayCache()
 {
   ClearPostVSCache();
+}
+
+void GLReplay::ReloadShaderDebugInformation()
+{
+  // Nop : GL does not have seperate debug information
 }
 
 ResourceId GLReplay::CreateProxyTexture(const TextureDescription &templateTex)

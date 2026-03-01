@@ -433,6 +433,10 @@ bool VkInitParams::IsSupportedVersion(uint64_t ver)
   if(ver == CurrentVersion)
     return true;
 
+  // 0x18 -> 0x19 - added serialised annotations
+  if(ver == 0x18)
+    return true;
+
   // 0x17 -> 0x18 - added IDs generated at capture time for inline shaders
   if(ver == 0x17)
     return true;
@@ -1030,6 +1034,7 @@ rdcstr HumanDriverName(VkDriverId driverId)
     case VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA: return "Imagination Open-source";
     case VK_DRIVER_ID_MESA_HONEYKRISP: return "Mesa Honeykrisp";
     case VK_DRIVER_ID_VULKAN_SC_EMULATION_ON_VULKAN: return "Vulkan SC Emulation on Vulkan";
+    case VK_DRIVER_ID_MESA_KOSMICKRISP: return "Mesa Kosmickrisp";
     case VK_DRIVER_ID_MAX_ENUM: break;
   }
 

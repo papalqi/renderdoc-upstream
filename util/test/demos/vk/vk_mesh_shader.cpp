@@ -35,8 +35,19 @@ RD_TEST(VK_Mesh_Shader, VulkanGraphicsTest)
 
 layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
 
+struct Inner
+{
+  uint a;
+  uint b;
+  uint c;
+};
+
 struct PayLoad
 {
+  uint padArr[4];
+  uint pad;
+  Inner inner;
+  Inner innerArr[4];
   uint tri[4];
 };
 
@@ -44,10 +55,25 @@ taskPayloadSharedEXT PayLoad payLoad;
 
 void main()
 {
-	payLoad.tri[0] = 0;
-	payLoad.tri[1] = 1;
-	payLoad.tri[2] = 2;
-	payLoad.tri[3] = 3;
+  for (int i = 0; i < 4; ++i)
+    payLoad.tri[i] = i;
+
+  for (int i = 0; i < 4; ++i)
+    payLoad.padArr[i] = 1000 + i;
+
+  payLoad.pad = 123;
+
+  for (int i = 0; i < 4; ++i)
+  {
+    payLoad.innerArr[i].a = 10*i + 0;
+    payLoad.innerArr[i].b = 10*i + 1;
+    payLoad.innerArr[i].c = 10*i + 2;
+  }
+
+  payLoad.inner.a = 500;
+  payLoad.inner.b = 501;
+  payLoad.inner.c = 502;
+
   EmitMeshTasksEXT(4, 1, 1);
 }
 
@@ -58,8 +84,19 @@ void main()
 #version 460
 #extension GL_EXT_mesh_shader : require
 
+struct Inner
+{
+  uint a;
+  uint b;
+  uint c;
+};
+
 struct PayLoad
 {
+  uint padArr[4];
+  uint pad;
+  Inner inner;
+  Inner innerArr[4];
   uint tri[4];
 };
 
@@ -77,9 +114,9 @@ void main()
   SetMeshOutputsEXT(vertexCount, triangleCount);
 
   uint dtid = gl_GlobalInvocationID.x;
-	uint tri = payLoad.tri[dtid];
+  uint tri = payLoad.tri[dtid];
   uint vertIdx = 0;
-	vec4 org = vec4(-0.65, 0.0, 0.0, 0.0) + vec4(0.42, 0.0, 0.0, 0.0) * tri;
+  vec4 org = vec4(-0.65, 0.0, 0.0, 0.0) + vec4(0.42, 0.0, 0.0, 0.0) * tri;
 
   uint vert0 = 0 + vertIdx;
   uint vert1 = 1 + vertIdx;

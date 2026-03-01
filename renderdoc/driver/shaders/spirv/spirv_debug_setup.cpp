@@ -465,6 +465,7 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
       "SPV_KHR_terminate_invocation",
       "SPV_KHR_vulkan_memory_model",
       "SPV_KHR_compute_shader_derivatives",
+      "SPV_KHR_integer_dot_product",
 
       // EXT extensions
       "SPV_EXT_demote_to_helper_invocation",
@@ -617,6 +618,11 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
       case Capability::SubgroupVoteKHR:
       case Capability::ComputeDerivativeGroupQuadsKHR:
       case Capability::ComputeDerivativeGroupLinearKHR:
+      // SPIR-V 1.6 / SPV_KHR_integer_dot_product
+      case Capability::DotProduct:
+      case Capability::DotProductInput4x8Bit:
+      case Capability::DotProductInput4x8BitPacked:
+      case Capability::DotProductInputAll:
       {
         supported = true;
         break;
@@ -643,16 +649,6 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
       case Capability::DenormFlushToZero:
       case Capability::RoundingModeRTE:
       case Capability::RoundingModeRTZ:
-      {
-        supported = false;
-        break;
-      }
-
-      // SPIR-V 1.6 / SPV_KHR_integer_dot_product
-      case Capability::DotProduct:
-      case Capability::DotProductInput4x8Bit:
-      case Capability::DotProductInput4x8BitPacked:
-      case Capability::DotProductInputAll:
       {
         supported = false;
         break;
@@ -769,6 +765,34 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
         break;
       }
 
+      // SPV_EXT_shader_invocation_reorder
+      case Capability::ShaderInvocationReorderEXT:
+      {
+        supported = false;
+        break;
+      }
+
+      // SPV_EXT_shader_subgroup_partitioned
+      case Capability::GroupNonUniformPartitionedEXT:
+      {
+        supported = false;
+        break;
+      }
+
+      // SPV_EXT_long_vector
+      case Capability::LongVectorEXT:
+      {
+        supported = false;
+        break;
+      }
+
+      // SPV_EXT_descriptor_heap
+      case Capability::DescriptorHeapEXT:
+      {
+        supported = false;
+        break;
+      }
+
       // no plans to support these - mostly Kernel/OpenCL related or vendor extensions
       case Capability::Addresses:
       case Capability::Linkage:
@@ -796,7 +820,6 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
       case Capability::PerViewAttributesNV:
       case Capability::MeshShadingNV:
       case Capability::ImageFootprintNV:
-      case Capability::GroupNonUniformPartitionedNV:
       case Capability::CooperativeMatrixNV:
       case Capability::ShaderSMBuiltinsNV:
       case Capability::SubgroupShuffleINTEL:
@@ -903,6 +926,7 @@ void Reflector::CheckDebuggable(bool &debuggable, rdcstr &debugStatus) const
       case Capability::BindlessImagesINTEL:
       case Capability::RayTracingNV:
       case Capability::ShaderInvocationReorderNV:
+      case Capability::PushConstantBanksNV:
       case Capability::Max:
       case Capability::Invalid:
       {
@@ -1566,6 +1590,123 @@ ShaderDebugTrace *Debugger::BeginDebug(DebugAPIWrapper *api, const ShaderStage s
       }
 
       bool bareUniform = false;
+      // GL Resource Arrays
+      if((api->GetGraphicsAPI() == GraphicsAPI::OpenGL) &&
+         (innertype->type == DataType::ArrayType && location != ~0U))
+      {
+        DataType *elementtype = &dataTypes[innertype->InnerType()];
+        DataType::Type baseType = elementtype->type;
+        if((baseType == DataType::SampledImageType) || (baseType == DataType::ImageType) ||
+           (baseType == DataType::SamplerType))
+        {
+          var.type = VarType::Struct;
+          debugType = DebugVariableType::ReadOnlyResource;
+
+          VarType memberType = VarType::ReadOnlyResource;
+          DescriptorCategory descCat = DescriptorCategory::ReadOnlyResource;
+          uint32_t texType = DebugAPIWrapper::Float_Texture;
+
+          if(baseType == DataType::SamplerType)
+          {
+            debugType = DebugVariableType::Sampler;
+            memberType = VarType::Sampler;
+            descCat = DescriptorCategory::Sampler;
+          }
+          else if(baseType == DataType::SampledImageType || baseType == DataType::ImageType)
+          {
+            // store the texture type here, since the image may be copied around and combined with
+            // a sampler, so accessing the original type might be non-trivial at point of access
+            Id imgid = elementtype->id;
+
+            if(baseType == DataType::SampledImageType)
+              imgid = sampledImageTypes[imgid].baseId;
+
+            RDCASSERT(imageTypes[imgid].dim != Dim::Max);
+
+            if(imageTypes[imgid].dim == Dim::Buffer)
+              texType |= DebugAPIWrapper::Buffer_Texture;
+
+            if(imageTypes[imgid].dim == Dim::SubpassData)
+              texType |= DebugAPIWrapper::Subpass_Texture;
+
+            if(imageTypes[imgid].retType.type == Op::TypeInt)
+            {
+              if(imageTypes[imgid].retType.signedness)
+                texType |= DebugAPIWrapper::SInt_Texture;
+              else
+                texType |= DebugAPIWrapper::UInt_Texture;
+            }
+
+            if(imageTypes[imgid].sampled == 2 && imageTypes[imgid].dim != Dim::SubpassData)
+            {
+              debugType = DebugVariableType::ReadWriteResource;
+              memberType = VarType::ReadWriteResource;
+              descCat = DescriptorCategory::ReadWriteResource;
+            }
+          }
+          int32_t idx = -1;
+          if(memberType == VarType::ReadOnlyResource)
+            idx = patchData.roInterface.indexOf(v.id);
+          else if(memberType == VarType::Sampler)
+            idx = patchData.samplerInterface.indexOf(v.id);
+          else if(memberType == VarType::ReadWriteResource)
+            idx = patchData.rwInterface.indexOf(v.id);
+
+          uint32_t len = uintComp(GetActiveLane().ids[innertype->length], 0);
+          for(uint32_t i = 0; i < len; ++i)
+          {
+            ShaderVariable member;
+
+            member.rows = 1;
+            member.columns = 1;
+            member.name = StringFormat::Fmt("[%u]", i);
+            member.type = memberType;
+
+            if((memberType == VarType::ReadOnlyResource) ||
+               (memberType == VarType::ReadWriteResource))
+              setTextureType(member, (DebugAPIWrapper::TextureType)texType);
+
+            // on GL we may have textures which are dead-code eliminated but remain part of the simulated
+            // code. Because we base our interfaces off the GLSL reflected data it may not be present.
+
+            // Bind to index "idx+i" because GL resource arrays are expanded in element order
+            if(idx >= 0)
+              member.SetBindIndex(ShaderBindIndex(descCat, idx + i, 0));
+            else
+              member.SetBindIndex(ShaderBindIndex());
+
+            var.members.push_back(member);
+
+            // Source mapping per array element because GL resource arrays are expanded
+            SourceVariableMapping sourceVar;
+            sourceVar.name = StringFormat::Fmt("%s[%u]", sourceName.c_str(), i);
+            sourceVar.type = var.members[i].type;
+            sourceVar.rows = 1;
+            sourceVar.columns = 1;
+            sourceVar.offset = 0;
+            sourceVar.variables.push_back(DebugVariableReference(
+                debugType, StringFormat::Fmt("%s[%u]", var.name.c_str(), i)));
+            ret->sourceVars.push_back(sourceVar);
+          }
+
+          if(debugType == DebugVariableType::ReadOnlyResource)
+          {
+            global.readOnlyResources.push_back(var);
+            pointerIDs.push_back(GLOBAL_POINTER(v.id, readOnlyResources));
+          }
+          else if(debugType == DebugVariableType::Sampler)
+          {
+            global.samplers.push_back(var);
+            pointerIDs.push_back(GLOBAL_POINTER(v.id, samplers));
+          }
+          else if(debugType == DebugVariableType::ReadWriteResource)
+          {
+            global.readWriteResources.push_back(var);
+            pointerIDs.push_back(GLOBAL_POINTER(v.id, readWriteResources));
+          }
+          continue;
+        }
+      }
 
       if(innertype->type == DataType::SamplerType)
       {
@@ -2626,11 +2767,24 @@ void Debugger::FillDebugSourceVars(rdcarray<InstructionSourceInfo> &instInfo) co
 
         if(n->children.empty())
         {
-          RDCASSERTNOTEQUAL(n->rows * n->columns, 0);
-          for(uint32_t c = 0; c < n->rows * n->columns; ++c)
+          ConstIter it = GetID(n->debugVar);
+
+          if(it.opcode() == Op::Undef)
           {
+            sourceVar.rows = sourceVar.columns = 1;
+            sourceVar.undefinedValue = true;
+
             sourceVar.variables.push_back(DebugVariableReference(
-                DebugVariableType::Variable, GetRawName(n->debugVar) + n->debugVarSuffix, c));
+                DebugVariableType::Variable, GetRawName(n->debugVar) + n->debugVarSuffix, 0));
+          }
+          else
+          {
+            RDCASSERTNOTEQUAL(n->rows * n->columns, 0);
+            for(uint32_t c = 0; c < n->rows * n->columns; ++c)
+            {
+              sourceVar.variables.push_back(DebugVariableReference(
+                  DebugVariableType::Variable, GetRawName(n->debugVar) + n->debugVarSuffix, c));
+            }
           }
         }
         else

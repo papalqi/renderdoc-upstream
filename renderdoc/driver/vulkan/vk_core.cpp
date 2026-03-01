@@ -244,6 +244,13 @@ WrappedVulkan::~WrappedVulkan()
   if(VkMarkerRegion::vk == this)
     VkMarkerRegion::vk = NULL;
 
+  for(auto it = m_Annotations.begin(); it != m_Annotations.end(); ++it)
+    delete it->second;
+  for(SDObject *o : m_EventAnnotations)
+    delete o;
+
+  delete m_RootAnnotation;
+
   SAFE_DELETE(m_StoredStructuredData);
 
   SAFE_DELETE(m_ASManager);
@@ -481,6 +488,14 @@ void WrappedVulkan::FlushQ()
   // CPU-GPU sync or whether it is just looking to recycle command buffers
   // (Particularly the one in vkQueuePresentKHR drawing the overlay)
 
+  // if there are multiple queue submissions in flight, wait for the previous queue to finish
+  if(m_PrevQueue != m_Queue)
+  {
+    if(m_PrevQueue != VK_NULL_HANDLE)
+      ObjDisp(m_PrevQueue)->QueueWaitIdle(Unwrap(m_PrevQueue));
+    m_PrevQueue = VK_NULL_HANDLE;
+  }
+
   // see comment in SubmitQ()
   if(m_Queue != VK_NULL_HANDLE)
   {
@@ -509,6 +524,17 @@ void WrappedVulkan::FlushQ()
   {
     m_InternalCmds.freesems.append(m_InternalCmds.submittedsems);
     m_InternalCmds.submittedsems.clear();
+  }
+}
+
+void WrappedVulkan::ReloadShaderDebugInformation()
+{
+  // Reload the shader module debug information
+  for(auto it = m_CreationInfo.m_ShaderModule.begin(); it != m_CreationInfo.m_ShaderModule.end(); ++it)
+  {
+    if(ResourceIDGen::IsReplayOnlyID(it->first))
+      continue;
+    it->second.Reload(m_ResourceManager, m_CreationInfo, it->first);
   }
 }
 
@@ -1230,6 +1256,10 @@ static const VkExtensionProperties supportedExtensions[] = {
     {
         VK_EXT_IMAGE_COMPRESSION_CONTROL_SWAPCHAIN_EXTENSION_NAME,
         VK_EXT_IMAGE_COMPRESSION_CONTROL_SWAPCHAIN_SPEC_VERSION,
+    },
+    {
+        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME,
+        VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_SPEC_VERSION,
     },
     {
         VK_EXT_IMAGE_ROBUSTNESS_EXTENSION_NAME,
@@ -2054,6 +2084,10 @@ static const VkExtensionProperties supportedExtensions[] = {
         VK_QCOM_FRAGMENT_DENSITY_MAP_OFFSET_SPEC_VERSION,
     },
     {
+        VK_QCOM_MULTIVIEW_PER_VIEW_VIEWPORTS_EXTENSION_NAME,
+        VK_QCOM_MULTIVIEW_PER_VIEW_VIEWPORTS_SPEC_VERSION,
+    },
+    {
         VK_QCOM_RENDER_PASS_SHADER_RESOLVE_EXTENSION_NAME,
         VK_QCOM_RENDER_PASS_SHADER_RESOLVE_SPEC_VERSION,
     },
@@ -2599,6 +2633,39 @@ bool WrappedVulkan::Serialise_BeginCaptureFrame(SerialiserType &ser)
 
   GetResourceManager()->SerialiseImageStates(ser, m_ImageStates);
 
+  if(ser.VersionAtLeast(0x19))
+  {
+    SCOPED_LOCK(m_AnnotationsLock);
+
+    SERIALISE_ELEMENT_LOCAL(numAnnotations, uint32_t(m_Annotations.size()));
+
+    auto it = m_Annotations.begin();
+    for(uint32_t i = 0; i < numAnnotations; i++)
+    {
+      SERIALISE_ELEMENT_LOCAL(id, it->first);
+      SDObject *annotation = NULL;
+      if(ser.IsReading())
+      {
+        annotation = new SDObject(""_lit, ""_lit);    // will be overwritten below
+      }
+      else
+      {
+        annotation = it->second;
+        it++;
+      }
+      ser.Serialise("annotation"_lit, *annotation);
+
+      if(ser.IsReading() && IsLoading(m_State))
+      {
+        m_Annotations[id] = annotation;
+        m_Replay->GetResourceDesc(id).annotations = annotation;
+      }
+    }
+
+    if(numAnnotations > 0)
+      m_Replay->WriteFrameRecord().frameInfo.containsAnnotations = true;
+  }
+
   SERIALISE_CHECK_READ_ERRORS();
 
   return true;
@@ -2834,6 +2901,9 @@ bool WrappedVulkan::EndFrameCapture(DeviceOwnedWindow devWnd)
   rdcarray<VkBuffer> DeadBuffers;
   rdcarray<VkImage> DeadImages;
   rdcarray<VkImageView> DeadImageViews;
+  rdcarray<VkDeviceMemory> DeadInternalMemories;
+  rdcarray<VkImage> DeadInternalImages;
+  rdcarray<VkImageView> DeadInternalImageViews;
 
   // transition back to IDLE atomically
   {
@@ -2862,6 +2932,9 @@ bool WrappedVulkan::EndFrameCapture(DeviceOwnedWindow devWnd)
       DeadBuffers.swap(m_DeviceAddressResources.DeadBuffers);
       DeadImages.swap(m_DeviceAddressResources.DeadImages);
       DeadImageViews.swap(m_DeviceAddressResources.DeadImageViews);
+      DeadInternalMemories.swap(m_InternalDeviceAddressResources.DeadMemories);
+      DeadInternalImages.swap(m_InternalDeviceAddressResources.DeadImages);
+      DeadInternalImageViews.swap(m_InternalDeviceAddressResources.DeadImageViews);
     }
   }
 
@@ -3225,6 +3298,24 @@ bool WrappedVulkan::EndFrameCapture(DeviceOwnedWindow devWnd)
   for(VkImageView v : DeadImageViews)
     vkDestroyImageView(m_Device, v, NULL);
 
+  for(VkDeviceMemory m : DeadInternalMemories)
+  {
+    ObjDisp(m_Device)->FreeMemory(Unwrap(m_Device), Unwrap(m), NULL);
+    GetResourceManager()->ReleaseWrappedResource(m, true);
+  }
+
+  for(VkImage i : DeadInternalImages)
+  {
+    ObjDisp(m_Device)->DestroyImage(Unwrap(m_Device), Unwrap(i), NULL);
+    GetResourceManager()->ReleaseWrappedResource(i, true);
+  }
+
+  for(VkImageView v : DeadInternalImageViews)
+  {
+    ObjDisp(m_Device)->DestroyImageView(Unwrap(m_Device), Unwrap(v), NULL);
+    GetResourceManager()->ReleaseWrappedResource(v, true);
+  }
+
   FreeAllMemory(MemoryScope::InitialContents);
   for(rdcstr &fn : m_InitTempFiles)
     FileIO::Delete(fn);
@@ -3250,6 +3341,9 @@ bool WrappedVulkan::DiscardFrameCapture(DeviceOwnedWindow devWnd)
   rdcarray<VkBuffer> DeadBuffers;
   rdcarray<VkImage> DeadImages;
   rdcarray<VkImageView> DeadImageViews;
+  rdcarray<VkDeviceMemory> DeadInternalMemories;
+  rdcarray<VkImage> DeadInternalImages;
+  rdcarray<VkImageView> DeadInternalImageViews;
 
   // transition back to IDLE atomically
   {
@@ -3277,6 +3371,9 @@ bool WrappedVulkan::DiscardFrameCapture(DeviceOwnedWindow devWnd)
       DeadBuffers.swap(m_DeviceAddressResources.DeadBuffers);
       DeadImages.swap(m_DeviceAddressResources.DeadImages);
       DeadImageViews.swap(m_DeviceAddressResources.DeadImageViews);
+      DeadInternalMemories.swap(m_InternalDeviceAddressResources.DeadMemories);
+      DeadInternalImages.swap(m_InternalDeviceAddressResources.DeadImages);
+      DeadInternalImageViews.swap(m_InternalDeviceAddressResources.DeadImageViews);
     }
   }
 
@@ -3291,6 +3388,24 @@ bool WrappedVulkan::DiscardFrameCapture(DeviceOwnedWindow devWnd)
 
   for(VkImageView v : DeadImageViews)
     vkDestroyImageView(m_Device, v, NULL);
+
+  for(VkDeviceMemory m : DeadInternalMemories)
+  {
+    ObjDisp(m_Device)->FreeMemory(Unwrap(m_Device), Unwrap(m), NULL);
+    GetResourceManager()->ReleaseWrappedResource(m, true);
+  }
+
+  for(VkImage i : DeadInternalImages)
+  {
+    ObjDisp(m_Device)->DestroyImage(Unwrap(m_Device), Unwrap(i), NULL);
+    GetResourceManager()->ReleaseWrappedResource(i, true);
+  }
+
+  for(VkImageView v : DeadInternalImageViews)
+  {
+    ObjDisp(m_Device)->DestroyImageView(Unwrap(m_Device), Unwrap(v), NULL);
+    GetResourceManager()->ReleaseWrappedResource(v, true);
+  }
 
   Atomic::Inc32(&m_ReuseEnabled);
 
@@ -3967,7 +4082,8 @@ RDResult WrappedVulkan::ContextReplayLog(CaptureState readType, uint32_t startEv
     {
       // these events are completely omitted, so don't increment the curEventID
       if(chunktype != VulkanChunk::vkBeginCommandBuffer &&
-         chunktype != VulkanChunk::vkEndCommandBuffer)
+         chunktype != VulkanChunk::vkEndCommandBuffer &&
+         chunktype != VulkanChunk::SetCommandAnnotation)
         m_BakedCmdBufferInfo[m_LastCmdBufferID].curEventID++;
     }
   }
@@ -4219,6 +4335,9 @@ bool WrappedVulkan::ContextProcessChunk(ReadSerialiser &ser, VulkanChunk chunk)
     else if(chunk == VulkanChunk::vkQueueEndDebugUtilsLabelEXT)
     {
       // also ignore, this just pops the action stack
+    }
+    else if(chunk == VulkanChunk::SetCommandAnnotation || chunk == VulkanChunk::SetQueueAnnotation)
+    {
     }
     else
     {
@@ -4803,6 +4922,13 @@ bool WrappedVulkan::ProcessChunk(ReadSerialiser &ser, VulkanChunk chunk)
     case VulkanChunk::vkCmdPushDescriptorSetWithTemplate2:
       return Serialise_vkCmdPushDescriptorSetWithTemplate2(ser, VK_NULL_HANDLE, NULL);
 
+    case VulkanChunk::SetQueueAnnotation:
+      return Serialise_SetQueueAnnotation(ser, VK_NULL_HANDLE, rdcstr(), eRENDERDOC_AnnotationMax,
+                                          0, RENDERDOC_AnnotationValue());
+    case VulkanChunk::SetCommandAnnotation:
+      return Serialise_SetCommandAnnotation(ser, VK_NULL_HANDLE, rdcstr(), eRENDERDOC_AnnotationMax,
+                                            0, RENDERDOC_AnnotationValue());
+
     // chunks that are reserved but not yet serialised
     case VulkanChunk::vkResetCommandPool:
     case VulkanChunk::vkCreateDepthTargetView:
@@ -4942,6 +5068,16 @@ void WrappedVulkan::ReplayLog(uint32_t startEventID, uint32_t endEventID, Replay
   {
     startEventID = 1;
     partial = false;
+
+    AddPendingObjectCleanup([this]() {
+      for(const rdcpair<VkCommandPool, VkCommandBuffer> &rerecord : m_RerecordCmdList)
+      {
+        m_commandQueueFamilies.erase(GetResID(rerecord.second));
+        vkFreeCommandBuffers(GetDev(), rerecord.first, 1, &rerecord.second);
+      }
+
+      m_RerecordCmdList.clear();
+    });
   }
 
   if(!partial)
@@ -5131,14 +5267,6 @@ void WrappedVulkan::ReplayLog(uint32_t startEventID, uint32_t endEventID, Replay
         ObjDisp(GetDev())->DestroyEvent(Unwrap(GetDev()), m_CleanupEvents[i], NULL);
 
       m_CleanupEvents.clear();
-
-      for(const rdcpair<VkCommandPool, VkCommandBuffer> &rerecord : m_RerecordCmdList)
-      {
-        m_commandQueueFamilies.erase(GetResID(rerecord.second));
-        vkFreeCommandBuffers(GetDev(), rerecord.first, 1, &rerecord.second);
-      }
-
-      m_RerecordCmdList.clear();
     });
   }
 
@@ -5339,8 +5467,9 @@ rdcstr WrappedVulkan::GetPhysDeviceCompatString(bool externalResource, bool orig
   if(externalResource)
   {
     ret =
-        "This resource was externally imported, which cannot happen at replay time.\n"
-        "Some drivers do not allow externally-imported resources to be bound to non-external "
+        "This resource was externally imported or had external API properties, which does not "
+        "happen at replay time.\n"
+        "Some drivers do not allow externally-interacting resources to be bound to non-external "
         "memory, meaning that captures using resources like this can't be replayed.\n\n";
   }
 
@@ -5504,6 +5633,11 @@ VkBool32 WrappedVulkan::DebugCallback(MessageSeverity severity, MessageCategory 
 
     // dedicated allocation size must match, but we have no choice but to ignore this one
     if(strstr(pMessageId, "VUID-VkMemoryDedicatedAllocateInfo-image-02964"))
+      return false;
+
+    // this complains about access flags being set when not valid but we commonly hit this with our
+    // all-access barriers. We do not expect this to actually break so ignore the spam
+    if(strstr(pMessageId, "VUID-vkCmdPipelineBarrier-pImageMemoryBarriers-02820"))
       return false;
 
     // "Missing extension required by the device extension VK_KHR_driver_properties:
@@ -6503,6 +6637,12 @@ void WrappedVulkan::AddEvent()
   }
   else
   {
+    if(m_RootAnnotation)
+    {
+      apievent.annotations = m_RootAnnotation->Duplicate();
+      m_EventAnnotations.push_back(apievent.annotations);
+    }
+
     m_RootEvents.push_back(apievent);
     m_Events.resize(apievent.eventId + 1);
     m_Events[apievent.eventId] = apievent;

@@ -2247,9 +2247,17 @@ void MainWindow::OnCaptureLoaded()
   updateToolsMenuOptions();
 
   ui->action_Start_Replay_Loop->setEnabled(true);
-  ui->action_Open_RGP_Profile->setEnabled(
-      m_Ctx.Replay().GetCaptureAccess()->FindSectionByType(SectionType::AMDRGPProfile) >= 0);
+
+  ui->action_Open_RGP_Profile->setEnabled(false);
   ui->action_Create_RGP_Profile->setEnabled(m_Ctx.APIProps().rgpCapture && m_Ctx.IsCaptureLocal());
+  m_Ctx.Replay().AsyncInvoke([this](IReplayController *) {
+    bool hasAMDGRPPorfile =
+        (m_Ctx.Replay().GetCaptureAccess()->FindSectionByType(SectionType::AMDRGPProfile) >= 0);
+
+    GUIInvoke::call(this, [this, hasAMDGRPPorfile]() {
+      ui->action_Open_RGP_Profile->setEnabled(hasAMDGRPPorfile);
+    });
+  });
 
   setCaptureHasErrors(!m_Ctx.DebugMessages().empty());
 
@@ -2271,6 +2279,15 @@ void MainWindow::OnCaptureLoaded()
 
   if(m_Ctx.HasEventBrowser())
     ToolWindowManager::raiseToolWindow(m_Ctx.GetEventBrowser()->Widget());
+
+  // the first time we load a capture with annotations, show/bring the annotation viewer to the
+  // front. After that, if the user hides it we won't show it again.
+  if(!m_Ctx.Config().Annotations_HasAutoShown && m_Ctx.FrameInfo().containsAnnotations)
+  {
+    m_Ctx.ShowAnnotationViewer();
+    m_Ctx.Config().Annotations_HasAutoShown = true;
+    ToolWindowManager::raiseToolWindow(m_Ctx.GetAnnotationViewer()->Widget());
+  }
 }
 
 void MainWindow::OnCaptureClosed()
@@ -2496,6 +2513,38 @@ void MainWindow::on_action_API_Inspector_triggered()
     else
     {
       ui->toolWindowManager->addToolWindow(apiInspector, leftToolArea());
+    }
+  }
+}
+
+void MainWindow::on_action_Annotation_Viewer_triggered()
+{
+  QWidget *annotViewer = m_Ctx.GetAnnotationViewer()->Widget();
+
+  if(ui->toolWindowManager->toolWindows().contains(annotViewer))
+  {
+    ToolWindowManager::raiseToolWindow(annotViewer);
+  }
+  else
+  {
+    if(m_Ctx.HasAPIInspector() &&
+       ui->toolWindowManager->toolWindows().contains(m_Ctx.GetAPIInspector()->Widget()))
+    {
+      ToolWindowManager::AreaReference ref(
+          ToolWindowManager::AddTo, ui->toolWindowManager->areaOf(m_Ctx.GetAPIInspector()->Widget()));
+      ui->toolWindowManager->addToolWindow(annotViewer, ref);
+    }
+    else if(m_Ctx.HasEventBrowser() &&
+            ui->toolWindowManager->toolWindows().contains(m_Ctx.GetEventBrowser()->Widget()))
+    {
+      ToolWindowManager::AreaReference ref(
+          ToolWindowManager::BottomOf,
+          ui->toolWindowManager->areaOf(m_Ctx.GetEventBrowser()->Widget()));
+      ui->toolWindowManager->addToolWindow(annotViewer, ref);
+    }
+    else
+    {
+      ui->toolWindowManager->addToolWindow(annotViewer, leftToolArea());
     }
   }
 }
@@ -3017,17 +3066,18 @@ void MainWindow::loadLayout_triggered()
 
 void MainWindow::updateToolsMenuOptions()
 {
-  bool hasEmbeddedDependencies = false;
-  bool hasPendingDependencies = false;
-
   if(m_Ctx.Replay().GetCaptureAccess())
   {
-    hasEmbeddedDependencies = m_Ctx.Replay().GetCaptureAccess()->HasEmbeddedDependencies();
-    hasPendingDependencies = m_Ctx.Replay().GetCaptureAccess()->HasPendingDependencies();
-  }
+    m_Ctx.Replay().AsyncInvoke([this](IReplayController *) {
+      bool hasEmbeddedDependencies = m_Ctx.Replay().GetCaptureAccess()->HasEmbeddedDependencies();
+      bool hasPendingDependencies = m_Ctx.Replay().GetCaptureAccess()->HasPendingDependencies();
 
-  ui->action_EmbedExternalFiles->setEnabled(!hasEmbeddedDependencies && hasPendingDependencies);
-  ui->action_RemoveExternalFiles->setEnabled(hasEmbeddedDependencies);
+      GUIInvoke::call(this, [this, hasEmbeddedDependencies, hasPendingDependencies]() {
+        ui->action_EmbedExternalFiles->setEnabled(!hasEmbeddedDependencies && hasPendingDependencies);
+        ui->action_RemoveExternalFiles->setEnabled(hasEmbeddedDependencies);
+      });
+    });
+  }
 }
 
 void MainWindow::closeEvent(QCloseEvent *event)
